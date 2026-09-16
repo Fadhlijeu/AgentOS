@@ -22,9 +22,13 @@
 //   });
 //   await agent.run("Find and summarize project notes");
 
-// ─── Agent Runtime ───────────────────────────────────────────────────────────
-export { Agent } from "@agentos/agent";
-export type { AgentConfig } from "@agentos/agent";
+// ─── Agent Runtime & Orchestrator ────────────────────────────────────────────
+export { Agent, AgentRuntime } from "@agentos/agent";
+export type {
+  AgentConfig,
+  AgentRuntimeConfig,
+  TaskOptions,
+} from "@agentos/agent";
 export {
   RunContext,
   RunStateMachine,
@@ -51,6 +55,11 @@ export type {
   OpenAIConfig,
   MockModelOptions,
   MockHandler,
+  WorkspaceAdapter,
+  BrowserSession,
+  BrowserProviderAdapter,
+  ToolErrorCode,
+  ToolExecutionResult,
 } from "@agentos/core";
 
 export {
@@ -60,6 +69,14 @@ export {
   MockModelProvider,
 } from "@agentos/core";
 
+// ─── Workspaces & Adapters ───────────────────────────────────────────────────
+export {
+  LocalWorkspace,
+  InMemoryWorkspace,
+  VirtualBrowserSession,
+  VirtualBrowserProvider,
+} from "@agentos/adapters";
+
 // ─── Tool System ─────────────────────────────────────────────────────────────
 export {
   ToolRegistry,
@@ -67,12 +84,15 @@ export {
   terminalTools,
   httpTools,
   httpRequestSchema,
+  browserTools,
+  classifyToolError,
 } from "@agentos/tools";
 
 export type {
   Tool,
   ToolContext,
   HttpRequestInput,
+  FilesystemToolsOptions,
 } from "@agentos/tools";
 
 // ─── Permissions & Human-in-the-Loop Approval ────────────────────────────────

@@ -7,33 +7,16 @@
 
 import type { Tool } from "@agentos/tools";
 
-// ─── Workspace Abstraction ───────────────────────────────────────────────────
+// ─── Core Abstractions Re-exported ───────────────────────────────────────────
 
-export interface WorkspaceAdapter {
-  readonly id: string;
-  readonly rootPath: string;
-  read(relativePath: string): Promise<string>;
-  write(relativePath: string, content: string): Promise<void>;
-  list(relativePath?: string): Promise<string[]>;
-  exists(relativePath: string): Promise<boolean>;
-  delete(relativePath: string): Promise<void>;
-}
+export type {
+  WorkspaceAdapter,
+  BrowserSession,
+  BrowserProviderAdapter,
+} from "@agentos/core";
 
-// ─── Browser Automation Abstraction ──────────────────────────────────────────
-
-export interface BrowserSession {
-  readonly sessionId: string;
-  navigate(url: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  type(selector: string, text: string): Promise<void>;
-  screenshot(): Promise<Buffer | Uint8Array>;
-  evaluate<T>(script: string): Promise<T>;
-  close(): Promise<void>;
-}
-
-export interface BrowserProviderAdapter {
-  createSession(options?: Record<string, unknown>): Promise<BrowserSession>;
-}
+export * from "./workspace";
+export * from "./browser";
 
 // ─── Code Interpreter Abstraction ────────────────────────────────────────────
 

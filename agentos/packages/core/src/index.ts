@@ -9,6 +9,11 @@ export type {
   AgentEventType,
   AgentEvent,
   AgentResult,
+  WorkspaceAdapter,
+  BrowserSession,
+  BrowserProviderAdapter,
+  ToolErrorCode,
+  ToolExecutionResult,
 } from "./types";
 
 export { generateId, isRiskAtLeast } from "./types";

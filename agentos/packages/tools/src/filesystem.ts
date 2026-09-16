@@ -1,11 +1,18 @@
 // ─── Filesystem Tools ────────────────────────────────────────────────────────
-// Real filesystem tools using Node.js fs module. Includes read, write, list,
-// exists, move, and delete operations with runtime Zod validation and proper risk levels.
+// Real filesystem tools using Node.js fs module or pluggable WorkspaceAdapter.
+// Includes read, write, list, exists, move, and delete operations with runtime
+// Zod validation, path confinement, and proper risk levels.
 
 import * as fs from "fs/promises";
 import * as path from "path";
 import { z } from "zod";
+import type { WorkspaceAdapter } from "@agentos/core";
 import type { Tool, ToolContext } from "./index";
+
+export interface FilesystemToolsOptions {
+  /** Optional workspace jail. If provided, all operations route through the workspace. */
+  workspace?: WorkspaceAdapter;
+}
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -37,7 +44,7 @@ export const filesystemDeleteSchema = z.object({
 
 // ─── filesystem_read ─────────────────────────────────────────────────────────
 
-function filesystemRead(): Tool {
+function filesystemRead(workspace?: WorkspaceAdapter): Tool {
   return {
     name: "filesystem_read",
     description:
@@ -66,7 +73,10 @@ function filesystemRead(): Tool {
 
       const filePath = parsed.data.path;
       try {
-        const content = await fs.readFile(filePath, "utf-8");
+        const content = workspace
+          ? await workspace.read(filePath)
+          : await fs.readFile(filePath, "utf-8");
+
         if (content.length > 50_000) {
           return (
             content.slice(0, 50_000) +
@@ -83,7 +93,7 @@ function filesystemRead(): Tool {
 
 // ─── filesystem_write ────────────────────────────────────────────────────────
 
-function filesystemWrite(): Tool {
+function filesystemWrite(workspace?: WorkspaceAdapter): Tool {
   return {
     name: "filesystem_write",
     description:
@@ -116,8 +126,12 @@ function filesystemWrite(): Tool {
 
       const { path: filePath, content } = parsed.data;
       try {
-        await fs.mkdir(path.dirname(filePath), { recursive: true });
-        await fs.writeFile(filePath, content, "utf-8");
+        if (workspace) {
+          await workspace.write(filePath, content);
+        } else {
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.writeFile(filePath, content, "utf-8");
+        }
         return `Successfully wrote ${content.length} characters to ${filePath}`;
       } catch (err) {
         return `Error writing file: ${(err as Error).message}`;
@@ -128,7 +142,7 @@ function filesystemWrite(): Tool {
 
 // ─── filesystem_list ─────────────────────────────────────────────────────────
 
-function filesystemList(): Tool {
+function filesystemList(workspace?: WorkspaceAdapter): Tool {
   return {
     name: "filesystem_list",
     description:
@@ -157,6 +171,12 @@ function filesystemList(): Tool {
 
       const dirPath = parsed.data.path;
       try {
+        if (workspace) {
+          const entries = await workspace.list(dirPath === "." ? "" : dirPath);
+          if (entries.length === 0) return `Directory is empty: ${dirPath}`;
+          return `Contents of ${dirPath}:\n${entries.map((e) => `[ITEM] ${e}`).join("\n")}`;
+        }
+
         const entries = await fs.readdir(dirPath, { withFileTypes: true });
         const lines: string[] = [];
 
@@ -186,7 +206,7 @@ function filesystemList(): Tool {
 
 // ─── filesystem_exists ───────────────────────────────────────────────────────
 
-function filesystemExists(): Tool {
+function filesystemExists(workspace?: WorkspaceAdapter): Tool {
   return {
     name: "filesystem_exists",
     description:
@@ -215,6 +235,11 @@ function filesystemExists(): Tool {
 
       const filePath = parsed.data.path;
       try {
+        if (workspace) {
+          const exists = await workspace.exists(filePath);
+          return `Exists: ${exists}`;
+        }
+
         const stat = await fs.stat(filePath);
         const type = stat.isDirectory() ? "directory" : "file";
         return `Exists: true, Type: ${type}, Size: ${formatBytes(stat.size)}`;
@@ -227,7 +252,7 @@ function filesystemExists(): Tool {
 
 // ─── filesystem_move ─────────────────────────────────────────────────────────
 
-function filesystemMove(): Tool {
+function filesystemMove(workspace?: WorkspaceAdapter): Tool {
   return {
     name: "filesystem_move",
     description:
@@ -260,6 +285,13 @@ function filesystemMove(): Tool {
 
       const { source: src, destination: dest } = parsed.data;
       try {
+        if (workspace) {
+          const content = await workspace.read(src);
+          await workspace.write(dest, content);
+          await workspace.delete(src);
+          return `Successfully moved ${src} → ${dest}`;
+        }
+
         await fs.mkdir(path.dirname(dest), { recursive: true });
         await fs.rename(src, dest);
         return `Successfully moved ${src} → ${dest}`;
@@ -272,7 +304,7 @@ function filesystemMove(): Tool {
 
 // ─── filesystem_delete ───────────────────────────────────────────────────────
 
-function filesystemDelete(): Tool {
+function filesystemDelete(workspace?: WorkspaceAdapter): Tool {
   return {
     name: "filesystem_delete",
     description:
@@ -301,6 +333,11 @@ function filesystemDelete(): Tool {
 
       const filePath = parsed.data.path;
       try {
+        if (workspace) {
+          await workspace.delete(filePath);
+          return `Successfully deleted: ${filePath}`;
+        }
+
         const stat = await fs.stat(filePath);
         if (stat.isDirectory()) {
           await fs.rm(filePath, { recursive: true, force: true });
@@ -328,13 +365,14 @@ function formatBytes(bytes: number): string {
 
 // ─── Export All Filesystem Tools ─────────────────────────────────────────────
 
-export function filesystemTools(): Tool[] {
+export function filesystemTools(options?: FilesystemToolsOptions): Tool[] {
+  const ws = options?.workspace;
   return [
-    filesystemRead(),
-    filesystemWrite(),
-    filesystemList(),
-    filesystemExists(),
-    filesystemMove(),
-    filesystemDelete(),
+    filesystemRead(ws),
+    filesystemWrite(ws),
+    filesystemList(ws),
+    filesystemExists(ws),
+    filesystemMove(ws),
+    filesystemDelete(ws),
   ];
 }

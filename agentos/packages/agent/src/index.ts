@@ -21,6 +21,7 @@ import {
   type ModelMessage,
   type ModelToolCall,
   type RiskLevel,
+  type WorkspaceAdapter,
 } from "@agentos/core";
 
 import { EventBus } from "@agentos/events";
@@ -31,6 +32,7 @@ import {
   filesystemTools,
   terminalTools,
   httpTools,
+  classifyToolError,
 } from "@agentos/tools";
 import {
   PermissionEngine,
@@ -66,6 +68,8 @@ import {
 export interface AgentConfig {
   /** LLM model provider (required). */
   model: ModelProvider;
+  /** Optional workspace jail confining filesystem operations. */
+  workspace?: WorkspaceAdapter;
   /** Tools available to the agent. */
   tools?: Tool[];
   /** Permission policy (optional — defaults to secure-by-default). */
@@ -99,6 +103,7 @@ export class Agent {
   private memory: MemoryManager;
   private store: PersistenceStore;
   private tracer: Tracer;
+  private workspace?: WorkspaceAdapter;
 
   private maxIterations: number;
   private verbose: boolean;
@@ -111,6 +116,7 @@ export class Agent {
 
   constructor(config: AgentConfig) {
     this.model = config.model;
+    this.workspace = config.workspace;
     this.maxIterations = config.maxIterations ?? 25;
     this.verbose = config.verbose ?? true;
     this.persistenceMode = config.persistenceMode ?? "best-effort";
@@ -122,6 +128,8 @@ export class Agent {
     this.toolRegistry = new ToolRegistry();
     if (config.tools) {
       this.toolRegistry.registerAll(config.tools);
+    } else if (config.workspace) {
+      this.toolRegistry.registerAll(filesystemTools({ workspace: config.workspace }));
     }
 
     // Permissions
@@ -295,6 +303,11 @@ export class Agent {
   /** Get the persistence store. */
   getStore(): PersistenceStore {
     return this.store;
+  }
+
+  /** Get the workspace adapter (if configured). */
+  getWorkspace(): WorkspaceAdapter | undefined {
+    return this.workspace;
   }
 
   /**
@@ -908,3 +921,99 @@ export {
   IllegalStateTransitionError,
 } from "@agentos/runtime";
 export type { AgentRun } from "@agentos/runtime";
+
+// ─── AgentRuntime Orchestrator ───────────────────────────────────────────────
+
+export interface TaskOptions {
+  task: string;
+  workspace?: WorkspaceAdapter;
+  signal?: AbortSignal;
+}
+
+export interface AgentRuntimeConfig extends AgentConfig {
+  workspace?: WorkspaceAdapter;
+}
+
+/**
+ * Top-level AgentOS execution orchestrator.
+ * Unifies model, workspace, memory, tools, policy, and persistence.
+ * Coordinates multi-run lifecycle execution across workspaces.
+ */
+export class AgentRuntime {
+  private agent: Agent;
+  private workspace?: WorkspaceAdapter;
+
+  constructor(config: AgentRuntimeConfig) {
+    this.workspace = config.workspace;
+    this.agent = new Agent(config);
+  }
+
+  getWorkspace(): WorkspaceAdapter | undefined {
+    return this.workspace;
+  }
+
+  getAgent(): Agent {
+    return this.agent;
+  }
+
+  getEventBus(): EventBus {
+    return this.agent.getEventBus();
+  }
+
+  getMemory(): MemoryManager {
+    return this.agent.getMemory();
+  }
+
+  getStore(): PersistenceStore {
+    return this.agent.getStore();
+  }
+
+  start(taskOrOptions: string | TaskOptions): AgentRun {
+    const task =
+      typeof taskOrOptions === "string" ? taskOrOptions : taskOrOptions.task;
+    return this.agent.start(task);
+  }
+
+  async run(taskOrOptions: string | TaskOptions): Promise<AgentResult> {
+    const task =
+      typeof taskOrOptions === "string" ? taskOrOptions : taskOrOptions.task;
+    return this.agent.run(task);
+  }
+
+  async pause(): Promise<void> {
+    return this.agent.pause();
+  }
+
+  async resume(): Promise<void> {
+    return this.agent.resume();
+  }
+
+  async cancel(): Promise<void> {
+    return this.agent.cancel();
+  }
+
+  getRuns(): AgentRun[] {
+    return this.agent.getActiveRuns();
+  }
+
+  getRun(runId: string): AgentRun | undefined {
+    return this.agent.getRun(runId);
+  }
+
+  async stopAll(): Promise<void> {
+    const runs = this.agent.getActiveRuns();
+    await Promise.all(runs.map((r) => r.cancel()));
+  }
+
+  async replay(runId: string): Promise<{
+    run: RunRecord | null;
+    events: AgentEvent[];
+    toolCalls: ToolCallRecord[];
+  }> {
+    return this.agent.replay(runId);
+  }
+
+  dispose(): void {
+    this.agent.dispose();
+  }
+}

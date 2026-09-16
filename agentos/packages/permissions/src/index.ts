@@ -35,6 +35,8 @@ export interface PermissionPolicy {
   browser?: {
     /** Origins the agent may navigate to. */
     allowOrigins?: string[];
+    /** Origins explicitly blocked from navigation. */
+    denyOrigins?: string[];
   };
 
   http?: {
@@ -101,7 +103,7 @@ export class PermissionEngine {
     }
 
     // ── Browser checks ─────────────────────────────────────────────────
-    if (normalizedName.startsWith("browser_") && this.policy.browser) {
+    if (normalizedName.startsWith("browser_")) {
       return this.checkBrowser(input);
     }
 
@@ -292,20 +294,61 @@ export class PermissionEngine {
   }
 
   private checkBrowser(input: Record<string, unknown>): PermissionDecision {
-    const browserPolicy = this.policy.browser!;
-    const url = String(input.url ?? "");
+    const urlStr = String(input.url ?? "").trim();
+    if (!urlStr) {
+      // Actions without URL (click, type, observe, screenshot)
+      return { allowed: true };
+    }
 
-    if (browserPolicy.allowOrigins && url) {
-      try {
-        const origin = new URL(url).origin;
-        if (!browserPolicy.allowOrigins.includes(origin)) {
-          return {
-            allowed: false,
-            reason: `Origin "${origin}" is not in allowed origins: ${browserPolicy.allowOrigins.join(", ")}`,
-          };
-        }
-      } catch {
-        return { allowed: false, reason: `Invalid URL: "${url}"` };
+    if (this.policy.trusted) {
+      return { allowed: true };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(urlStr);
+    } catch {
+      return { allowed: false, reason: `Invalid URL format: "${urlStr}"` };
+    }
+
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return {
+        allowed: false,
+        reason: `Forbidden protocol "${parsedUrl.protocol}". Only "http:" and "https:" are allowed in browser navigation.`,
+      };
+    }
+
+    const origin = parsedUrl.origin;
+    const browserPolicy = this.policy.browser;
+    const httpPolicy = this.policy.http;
+
+    // Check deny list (from browser policy or general http policy)
+    const denyList = [
+      ...(browserPolicy?.denyOrigins ?? []),
+      ...(httpPolicy?.denyOrigins ?? []),
+    ];
+    if (
+      denyList.some(
+        (denied) => urlStr.startsWith(denied) || origin === denied
+      )
+    ) {
+      return {
+        allowed: false,
+        reason: `Origin or URL "${urlStr}" is explicitly denied by security policy`,
+      };
+    }
+
+    // Check allow list
+    const allowList = browserPolicy?.allowOrigins ?? httpPolicy?.allowOrigins;
+    if (allowList && allowList.length > 0) {
+      const isAllowed = allowList.some(
+        (allowed) => origin === allowed || urlStr.startsWith(allowed)
+      );
+      if (!isAllowed) {
+        return {
+          allowed: false,
+          reason: `Origin "${origin}" is not in allowed origins: ${allowList.join(", ")}`,
+        };
       }
     }
 

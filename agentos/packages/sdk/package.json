@@ -19,6 +19,7 @@
     "@agentos/planner": "workspace:*",
     "@agentos/memory": "workspace:*",
     "@agentos/storage": "workspace:*",
-    "@agentos/observability": "workspace:*"
+    "@agentos/observability": "workspace:*",
+    "@agentos/adapters": "workspace:*"
   }
 }

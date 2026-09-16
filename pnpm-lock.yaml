@@ -41,6 +41,9 @@ importers:
       '@agentos/core':
         specifier: workspace:*
         version: link:../core
+      '@agentos/permissions':
+        specifier: workspace:*
+        version: link:../permissions
       '@agentos/tools':
         specifier: workspace:*
         version: link:../tools
@@ -127,6 +130,9 @@ importers:
 
   agentos/packages/sdk:
     dependencies:
+      '@agentos/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@agentos/agent':
         specifier: workspace:*
         version: link:../agent

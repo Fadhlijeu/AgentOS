@@ -119,9 +119,90 @@ export class ToolRegistry {
   }
 }
 
+// ─── Error Classification ───────────────────────────────────────────────────
+
+import type { ToolErrorCode, ToolExecutionResult } from "@agentos/core";
+
+export type { ToolErrorCode, ToolExecutionResult };
+
+/**
+ * Classifies an error resulting from tool invocation, determining its category
+ * and whether the agent should attempt self-correction / retry.
+ */
+export function classifyToolError(
+  err: unknown,
+  toolName?: string
+): NonNullable<ToolExecutionResult["error"]> {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+
+  let code: ToolErrorCode = "EXECUTION_ERROR";
+  let retryable = false;
+
+  if (
+    lower.includes("validation error") ||
+    lower.includes("zod") ||
+    lower.includes("input validation")
+  ) {
+    code = "VALIDATION_ERROR";
+    retryable = true; // Model can adjust arguments and retry
+  } else if (
+    lower.includes("permission denied") ||
+    lower.includes("security violation") ||
+    lower.includes("not in allowed") ||
+    lower.includes("forbidden protocol")
+  ) {
+    code = "PERMISSION_DENIED";
+    retryable = false;
+  } else if (
+    lower.includes("action denied by user") ||
+    lower.includes("approval denied")
+  ) {
+    code = "APPROVAL_DENIED";
+    retryable = false;
+  } else if (
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("aborted")
+  ) {
+    code = "TIMEOUT";
+    retryable = true;
+  } else if (
+    lower.includes("not found") ||
+    lower.includes("enoent") ||
+    lower.includes("no such file") ||
+    lower.includes("404")
+  ) {
+    code = "NOT_FOUND";
+    retryable = true;
+  } else if (
+    lower.includes("network") ||
+    lower.includes("econnrefused") ||
+    lower.includes("fetch failed")
+  ) {
+    code = "NETWORK_ERROR";
+    retryable = true;
+  }
+
+  return {
+    code,
+    message: msg,
+    retryable,
+  };
+}
+
 // ─── Re-exports ──────────────────────────────────────────────────────────────
 
 export { filesystemTools } from "./filesystem";
+export type { FilesystemToolsOptions } from "./filesystem";
 export { terminalTools } from "./terminal";
 export { httpTools, httpRequestSchema } from "./http";
 export type { HttpRequestInput } from "./http";
+export {
+  browserTools,
+  browserOpenSchema,
+  browserClickSchema,
+  browserTypeSchema,
+  browserObserveSchema,
+  browserScreenshotSchema,
+} from "./browser";

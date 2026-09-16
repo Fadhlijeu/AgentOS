@@ -7,10 +7,11 @@
     "build": "pnpm -r run build",
     "clean": "pnpm -r run clean",
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "test": "npx tsx agentos/tests/e2e-verification.ts && npx tsx agentos/tests/security-hardening.test.ts && npx tsx agentos/tests/lifecycle-concurrency.test.ts && npx tsx agentos/tests/memory-http-replay.test.ts",
+    "test": "npx tsx agentos/tests/e2e-verification.ts && npx tsx agentos/tests/security-hardening.test.ts && npx tsx agentos/tests/lifecycle-concurrency.test.ts && npx tsx agentos/tests/memory-http-replay.test.ts && npx tsx agentos/tests/workspace-browser-runtime.test.ts",
     "test:security": "npx tsx agentos/tests/security-hardening.test.ts",
     "test:lifecycle": "npx tsx agentos/tests/lifecycle-concurrency.test.ts",
     "test:phase3": "npx tsx agentos/tests/memory-http-replay.test.ts",
+    "test:phase4": "npx tsx agentos/tests/workspace-browser-runtime.test.ts",
     "example:basic": "npx tsx agentos/examples/basic-agent.ts",
     "example:filesystem": "npx tsx agentos/examples/filesystem-agent.ts",
     "playground": "npx tsx agentos/apps/playground/src/index.ts"

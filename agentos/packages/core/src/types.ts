@@ -93,3 +93,60 @@ const RISK_ORDER: Record<RiskLevel, number> = {
 export function isRiskAtLeast(level: RiskLevel, threshold: RiskLevel): boolean {
   return RISK_ORDER[level] >= RISK_ORDER[threshold];
 }
+
+// ─── Workspace Abstraction ───────────────────────────────────────────────────
+
+export interface WorkspaceAdapter {
+  readonly id: string;
+  readonly rootPath: string;
+  read(relativePath: string): Promise<string>;
+  write(relativePath: string, content: string): Promise<void>;
+  list(relativePath?: string): Promise<string[]>;
+  exists(relativePath: string): Promise<boolean>;
+  delete(relativePath: string): Promise<void>;
+  mkdir?(relativePath: string): Promise<void>;
+  resolvePath?(relativePath: string): string;
+}
+
+// ─── Browser Automation Abstraction ──────────────────────────────────────────
+
+export interface BrowserSession {
+  readonly sessionId: string;
+  navigate(url: string): Promise<void>;
+  click(selector: string): Promise<void>;
+  type(selector: string, text: string): Promise<void>;
+  screenshot(): Promise<Buffer | Uint8Array>;
+  evaluate<T>(script: string): Promise<T>;
+  observe?(): Promise<{
+    url: string;
+    title: string;
+    content: string;
+    elements: Array<{ selector: string; tag: string; text?: string; value?: string; href?: string }>;
+  }>;
+  close(): Promise<void>;
+}
+
+export interface BrowserProviderAdapter {
+  createSession(options?: Record<string, unknown>): Promise<BrowserSession>;
+}
+
+// ─── Tool Error Classification ───────────────────────────────────────────────
+
+export type ToolErrorCode =
+  | "VALIDATION_ERROR"
+  | "PERMISSION_DENIED"
+  | "APPROVAL_DENIED"
+  | "TIMEOUT"
+  | "NOT_FOUND"
+  | "EXECUTION_ERROR"
+  | "NETWORK_ERROR";
+
+export interface ToolExecutionResult {
+  ok: boolean;
+  output?: string;
+  error?: {
+    code: ToolErrorCode;
+    message: string;
+    retryable: boolean;
+  };
+}
