@@ -1,0 +1,16 @@
+{
+  "name": "@agentos/playground",
+  "version": "0.1.0",
+  "description": "Playground application for AgentOS — interactive exploration of agent capabilities",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@agentos/sdk": "workspace:*"
+  }
+}

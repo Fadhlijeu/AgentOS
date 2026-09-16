@@ -1,0 +1,28 @@
+{
+  "name": "agentos-workspace",
+  "version": "0.1.0",
+  "description": "AgentOS — The runtime for AI agents that operate computers.",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r run build",
+    "clean": "pnpm -r run clean",
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "test": "npx tsx agentos/tests/e2e-verification.ts",
+    "example:basic": "npx tsx agentos/examples/basic-agent.ts",
+    "example:filesystem": "npx tsx agentos/examples/filesystem-agent.ts",
+    "playground": "npx tsx agentos/apps/playground/src/index.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.16.0",
+    "@types/node": "^22.0.0",
+    "@types/better-sqlite3": "^7.6.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "zod": "^3.23.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
