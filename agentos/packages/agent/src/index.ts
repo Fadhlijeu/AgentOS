@@ -30,6 +30,7 @@ import {
   PermissionEngine,
   ApprovalManager,
   AutoApprovalHandler,
+  ConsoleApprovalHandler,
   type PermissionPolicy,
   type ApprovalHandler,
 } from "@agentos/permissions";
@@ -97,8 +98,12 @@ export class Agent {
     // Permissions
     this.permissionEngine = new PermissionEngine(config.permissions);
 
-    // Approval
-    const approvalHandler = config.approvalHandler ?? new AutoApprovalHandler();
+    // Approval — secure by default: prompt in console unless trusted mode is enabled
+    const approvalHandler =
+      config.approvalHandler ??
+      (config.permissions?.trusted
+        ? new AutoApprovalHandler()
+        : new ConsoleApprovalHandler());
     this.approvalManager = new ApprovalManager(
       approvalHandler,
       this.eventBus,
@@ -111,14 +116,21 @@ export class Agent {
     // Memory
     this.memory = new MemoryManager();
 
-    // Storage — try SQLite, fall back to a no-op store if it fails
-    try {
-      this.store = new SQLiteStore(config.dbPath ?? ":memory:");
-    } catch (err) {
-      if (this.verbose) {
-        console.warn("[Agent] SQLite unavailable, using no-op storage:", (err as Error).message);
+    // Storage — fail-fast if an explicit database path was requested
+    if (config.dbPath && config.dbPath !== ":memory:") {
+      this.store = new SQLiteStore(config.dbPath);
+    } else {
+      try {
+        this.store = new SQLiteStore(":memory:");
+      } catch (err) {
+        if (this.verbose) {
+          console.warn(
+            "[Agent] SQLite in-memory unavailable, using no-op storage:",
+            (err as Error).message
+          );
+        }
+        this.store = createNoOpStore();
       }
-      this.store = createNoOpStore();
     }
 
     // Observability
@@ -453,6 +465,23 @@ export class Agent {
       taskId,
       data: { toolName: toolCall.name, arguments: toolCall.arguments },
     });
+
+    // ── Input Schema Validation ─────────────────────────────────────────
+    if (tool.schema) {
+      const parsed = tool.schema.safeParse(toolCall.arguments);
+      if (!parsed.success) {
+        const errorMsg = `Input Validation Error: ${parsed.error.errors
+          .map((e) => `${e.path.join(".") || "input"}: ${e.message}`)
+          .join(", ")}`;
+        this.eventBus.emit("tool.failed", {
+          runId,
+          taskId,
+          data: { toolName: toolCall.name, error: errorMsg },
+        });
+        this.tracer.recordError(runId, taskId, errorMsg);
+        return `Error: ${errorMsg}`;
+      }
+    }
 
     // ── Permission Check ────────────────────────────────────────────────
     const permission = this.permissionEngine.check(

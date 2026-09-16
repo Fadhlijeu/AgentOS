@@ -72,6 +72,8 @@ export {
   ApprovalManager,
   ConsoleApprovalHandler,
   AutoApprovalHandler,
+  isPathInside,
+  parseCommand,
 } from "@agentos/permissions";
 
 export type {

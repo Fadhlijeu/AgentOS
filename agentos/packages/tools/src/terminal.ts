@@ -1,12 +1,17 @@
 // ─── Terminal Tool ───────────────────────────────────────────────────────────
-// Executes shell commands via child_process with stdout/stderr capture,
-// timeout support, and proper error handling.
+// Executes shell commands via controlled child_process.spawn with argument vector
+// isolation, shell operator rejection, timeout enforcement, and stdout/stderr capture.
 
-import { exec as execCb } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
+import { z } from "zod";
+import { parseCommand } from "@agentos/permissions";
 import type { Tool, ToolContext } from "./index";
 
-const execAsync = promisify(execCb);
+export const terminalExecSchema = z.object({
+  command: z.string().min(1, "command is required"),
+  cwd: z.string().optional(),
+  timeout: z.number().positive().optional(),
+});
 
 // ─── terminal_exec ───────────────────────────────────────────────────────────
 
@@ -16,13 +21,13 @@ function terminalExec(): Tool {
     description:
       "Execute a shell command and return its output. Captures both stdout and stderr. " +
       "Use this to run programs, check system state, install packages, use git, etc. " +
-      "Commands run with a timeout (default 30s). Be careful with destructive commands.",
+      "Commands run with a timeout (default 30s). Chained commands (&&, ;, |) are strictly blocked for security.",
     parameters: {
       type: "object",
       properties: {
         command: {
           type: "string",
-          description: "The shell command to execute",
+          description: "The shell command to execute (single unchained command)",
         },
         cwd: {
           type: "string",
@@ -37,72 +42,103 @@ function terminalExec(): Tool {
       required: ["command"],
       additionalProperties: false,
     },
+    schema: terminalExecSchema,
     riskLevel: "HIGH",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const command = String(input.command);
-      const cwd = input.cwd ? String(input.cwd) : undefined;
-      const timeout =
-        typeof input.timeout === "number" ? input.timeout : 30_000;
+      // 1. Validate input schema
+      const parsedInput = terminalExecSchema.safeParse(input);
+      if (!parsedInput.success) {
+        return `Validation Error: ${parsedInput.error.errors
+          .map((e) => `${e.path.join(".") || "input"}: ${e.message}`)
+          .join(", ")}`;
+      }
 
-      try {
-        const { stdout, stderr } = await execAsync(command, {
+      const { command, cwd, timeout = 30_000 } = parsedInput.data;
+
+      // 2. Parse command and verify no shell operators / injection
+      const parseResult = parseCommand(command);
+      if (!parseResult.ok || !parseResult.command) {
+        return `Security Error: ${parseResult.error ?? "Invalid command format"}`;
+      }
+
+      const { executable, args } = parseResult.command;
+
+      // 3. Execute with controlled spawn
+      return new Promise<string>((resolve) => {
+        const isWindows = process.platform === "win32";
+
+        // Spawn child process with isolated args vector
+        const child = spawn(executable, args, {
           cwd,
-          timeout,
-          maxBuffer: 1024 * 1024 * 5, // 5 MB
+          shell: isWindows,
           windowsHide: true,
         });
 
-        const parts: string[] = [];
-        if (stdout.trim()) parts.push(`stdout:\n${stdout.trim()}`);
-        if (stderr.trim()) parts.push(`stderr:\n${stderr.trim()}`);
+        let stdout = "";
+        let stderr = "";
+        let killedByTimeout = false;
 
-        const output = parts.join("\n\n") || "(no output)";
+        const timer = setTimeout(() => {
+          killedByTimeout = true;
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // ignore
+          }
+        }, timeout);
 
-        // Truncate very long output to protect LLM context
-        if (output.length > 30_000) {
-          return (
-            output.slice(0, 30_000) +
-            `\n\n[...truncated — output is ${output.length} characters total]`
-          );
-        }
-        return output;
-      } catch (err: any) {
-        const parts: string[] = [`Error executing command: ${command}`];
+        child.stdout?.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
 
-        if (err.killed) {
-          parts.push(`Process killed (likely timeout after ${timeout}ms)`);
-        }
-        if (err.code !== undefined) {
-          parts.push(`Exit code: ${err.code}`);
-        }
-        if (err.stdout?.trim()) {
-          parts.push(`stdout:\n${err.stdout.trim()}`);
-        }
-        if (err.stderr?.trim()) {
-          parts.push(`stderr:\n${err.stderr.trim()}`);
-        }
-        if (!err.stdout && !err.stderr && err.message) {
-          parts.push(`Message: ${err.message}`);
-        }
+        child.stderr?.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
 
-        return parts.join("\n");
-      }
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          resolve(`Error executing command "${command}": ${err.message}`);
+        });
+
+        child.on("close", (code) => {
+          clearTimeout(timer);
+
+          if (killedByTimeout) {
+            resolve(
+              `Error: Process killed after exceeding timeout of ${timeout}ms`
+            );
+            return;
+          }
+
+          const parts: string[] = [];
+          if (stdout.trim()) parts.push(`stdout:\n${stdout.trim()}`);
+          if (stderr.trim()) parts.push(`stderr:\n${stderr.trim()}`);
+          if (code !== 0 && code !== null) {
+            parts.push(`Exit code: ${code}`);
+          }
+
+          const fullOutput = parts.join("\n\n") || "(no output)";
+
+          // Truncate output if excessively large
+          if (fullOutput.length > 30_000) {
+            resolve(
+              fullOutput.slice(0, 30_000) +
+                `\n\n[...truncated — output is ${fullOutput.length} characters total]`
+            );
+          } else {
+            resolve(fullOutput);
+          }
+        });
+      });
     },
   };
 }
 
 // ─── Export ──────────────────────────────────────────────────────────────────
 
-/**
- * Returns all terminal tools. Currently just `terminal_exec`.
- *
- * ```ts
- * registry.registerAll(terminalTools());
- * ```
- */
 export function terminalTools(): Tool[] {
   return [terminalExec()];
 }

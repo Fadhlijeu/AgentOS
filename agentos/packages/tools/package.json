@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@agentos/core": "workspace:*",
+    "@agentos/permissions": "workspace:*",
     "zod": "^3.23.0"
   }
 }

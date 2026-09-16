@@ -16,22 +16,27 @@ export interface ToolContext {
   emit: (event: string, data: Record<string, unknown>) => void;
 }
 
+import { z } from "zod";
+
 // ─── Tool Interface ──────────────────────────────────────────────────────────
 
 /**
  * A tool that the agent can invoke. Every tool has:
  * - A unique name (used in LLM tool-calling)
- * - A JSON Schema describing its parameters
+ * - A JSON Schema describing its parameters (sent to LLM)
+ * - An optional runtime Zod schema for input validation
  * - A risk level determining approval requirements
  * - An execute function that performs the actual work
  */
-export interface Tool {
+export interface Tool<TInput = Record<string, unknown>> {
   /** Unique tool name, e.g. "filesystem_read" or "terminal_exec". */
   name: string;
   /** Human-readable description shown to the LLM. */
   description: string;
-  /** JSON Schema for the tool's input parameters. */
+  /** JSON Schema for the tool's input parameters (for LLM prompt). */
   parameters: Record<string, unknown>;
+  /** Optional runtime Zod schema for validating tool arguments before execution. */
+  schema?: z.ZodType<TInput>;
   /** Risk level — determines whether human approval is required. */
   riskLevel: RiskLevel;
   /**
@@ -40,6 +45,8 @@ export interface Tool {
    */
   execute(input: Record<string, unknown>, ctx: ToolContext): Promise<string>;
 }
+
+export { z };
 
 // ─── Tool Registry ───────────────────────────────────────────────────────────
 

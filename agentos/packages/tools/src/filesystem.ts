@@ -1,10 +1,39 @@
 // ─── Filesystem Tools ────────────────────────────────────────────────────────
 // Real filesystem tools using Node.js fs module. Includes read, write, list,
-// exists, move, and delete operations with proper risk levels.
+// exists, move, and delete operations with runtime Zod validation and proper risk levels.
 
 import * as fs from "fs/promises";
 import * as path from "path";
+import { z } from "zod";
 import type { Tool, ToolContext } from "./index";
+
+// ─── Schemas ─────────────────────────────────────────────────────────────────
+
+export const filesystemReadSchema = z.object({
+  path: z.string().min(1, "path is required"),
+});
+
+export const filesystemWriteSchema = z.object({
+  path: z.string().min(1, "path is required"),
+  content: z.string(),
+});
+
+export const filesystemListSchema = z.object({
+  path: z.string().default("."),
+});
+
+export const filesystemExistsSchema = z.object({
+  path: z.string().min(1, "path is required"),
+});
+
+export const filesystemMoveSchema = z.object({
+  source: z.string().min(1, "source is required"),
+  destination: z.string().min(1, "destination is required"),
+});
+
+export const filesystemDeleteSchema = z.object({
+  path: z.string().min(1, "path is required"),
+});
 
 // ─── filesystem_read ─────────────────────────────────────────────────────────
 
@@ -18,21 +47,26 @@ function filesystemRead(): Tool {
       properties: {
         path: {
           type: "string",
-          description: "Absolute path to the file to read",
+          description: "Absolute or relative path to the file to read",
         },
       },
       required: ["path"],
       additionalProperties: false,
     },
+    schema: filesystemReadSchema,
     riskLevel: "LOW",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const filePath = String(input.path);
+      const parsed = filesystemReadSchema.safeParse(input);
+      if (!parsed.success) {
+        return `Validation Error: ${parsed.error.errors.map((e) => `${e.path.join(".") || "input"}: ${e.message}`).join(", ")}`;
+      }
+
+      const filePath = parsed.data.path;
       try {
         const content = await fs.readFile(filePath, "utf-8");
-        // Truncate very large files to avoid blowing up the LLM context
         if (content.length > 50_000) {
           return (
             content.slice(0, 50_000) +
@@ -59,7 +93,7 @@ function filesystemWrite(): Tool {
       properties: {
         path: {
           type: "string",
-          description: "Absolute path to the file to write",
+          description: "Path to the file to write",
         },
         content: {
           type: "string",
@@ -69,13 +103,18 @@ function filesystemWrite(): Tool {
       required: ["path", "content"],
       additionalProperties: false,
     },
+    schema: filesystemWriteSchema,
     riskLevel: "MEDIUM",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const filePath = String(input.path);
-      const content = String(input.content);
+      const parsed = filesystemWriteSchema.safeParse(input);
+      if (!parsed.success) {
+        return `Validation Error: ${parsed.error.errors.map((e) => `${e.path.join(".") || "input"}: ${e.message}`).join(", ")}`;
+      }
+
+      const { path: filePath, content } = parsed.data;
       try {
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
@@ -99,18 +138,24 @@ function filesystemList(): Tool {
       properties: {
         path: {
           type: "string",
-          description: "Absolute path to the directory to list",
+          description: "Path to the directory to list (defaults to current directory)",
         },
       },
       required: ["path"],
       additionalProperties: false,
     },
+    schema: filesystemListSchema,
     riskLevel: "LOW",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const dirPath = String(input.path);
+      const parsed = filesystemListSchema.safeParse(input);
+      if (!parsed.success) {
+        return `Validation Error: ${parsed.error.errors.map((e) => `${e.path.join(".") || "input"}: ${e.message}`).join(", ")}`;
+      }
+
+      const dirPath = parsed.data.path;
       try {
         const entries = await fs.readdir(dirPath, { withFileTypes: true });
         const lines: string[] = [];
@@ -151,18 +196,24 @@ function filesystemExists(): Tool {
       properties: {
         path: {
           type: "string",
-          description: "Absolute path to check",
+          description: "Path to check",
         },
       },
       required: ["path"],
       additionalProperties: false,
     },
+    schema: filesystemExistsSchema,
     riskLevel: "LOW",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const filePath = String(input.path);
+      const parsed = filesystemExistsSchema.safeParse(input);
+      if (!parsed.success) {
+        return `Validation Error: ${parsed.error.errors.map((e) => `${e.path.join(".") || "input"}: ${e.message}`).join(", ")}`;
+      }
+
+      const filePath = parsed.data.path;
       try {
         const stat = await fs.stat(filePath);
         const type = stat.isDirectory() ? "directory" : "file";
@@ -186,23 +237,28 @@ function filesystemMove(): Tool {
       properties: {
         source: {
           type: "string",
-          description: "Absolute path of the source file or directory",
+          description: "Path of the source file or directory",
         },
         destination: {
           type: "string",
-          description: "Absolute path of the destination",
+          description: "Path of the destination",
         },
       },
       required: ["source", "destination"],
       additionalProperties: false,
     },
+    schema: filesystemMoveSchema,
     riskLevel: "HIGH",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const src = String(input.source);
-      const dest = String(input.destination);
+      const parsed = filesystemMoveSchema.safeParse(input);
+      if (!parsed.success) {
+        return `Validation Error: ${parsed.error.errors.map((e) => `${e.path.join(".") || "input"}: ${e.message}`).join(", ")}`;
+      }
+
+      const { source: src, destination: dest } = parsed.data;
       try {
         await fs.mkdir(path.dirname(dest), { recursive: true });
         await fs.rename(src, dest);
@@ -226,18 +282,24 @@ function filesystemDelete(): Tool {
       properties: {
         path: {
           type: "string",
-          description: "Absolute path to the file or directory to delete",
+          description: "Path to the file or directory to delete",
         },
       },
       required: ["path"],
       additionalProperties: false,
     },
+    schema: filesystemDeleteSchema,
     riskLevel: "CRITICAL",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
     ): Promise<string> {
-      const filePath = String(input.path);
+      const parsed = filesystemDeleteSchema.safeParse(input);
+      if (!parsed.success) {
+        return `Validation Error: ${parsed.error.errors.map((e) => `${e.path.join(".") || "input"}: ${e.message}`).join(", ")}`;
+      }
+
+      const filePath = parsed.data.path;
       try {
         const stat = await fs.stat(filePath);
         if (stat.isDirectory()) {
@@ -266,13 +328,6 @@ function formatBytes(bytes: number): string {
 
 // ─── Export All Filesystem Tools ─────────────────────────────────────────────
 
-/**
- * Returns all filesystem tools. Pass the result to ToolRegistry.registerAll().
- *
- * ```ts
- * registry.registerAll(filesystemTools());
- * ```
- */
 export function filesystemTools(): Tool[] {
   return [
     filesystemRead(),

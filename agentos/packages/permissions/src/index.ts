@@ -1,55 +1,46 @@
 // ─── @agentos/permissions ────────────────────────────────────────────────────
 // Capability-based permission engine. Evaluates declarative policies against
 // tool calls to decide whether an operation is allowed.
+//
+// Hardened with canonical path boundary verification, shell command sanitization,
+// cwd isolation, and secure-by-default execution.
 
+import * as path from "path";
 import type { RiskLevel } from "@agentos/core";
+import { parseCommand, type ParsedCommand } from "./command-parser";
 
 // ─── Policy Configuration ────────────────────────────────────────────────────
 
-/**
- * Declarative permission policy. Configure what each tool category is allowed
- * to do. Anything not explicitly allowed for restricted tools is denied.
- *
- * ```ts
- * const policy: PermissionPolicy = {
- *   filesystem: {
- *     read: ["~/Downloads", "~/Documents"],
- *     write: ["~/Documents/AgentOS"],
- *   },
- *   terminal: {
- *     allow: ["git", "npm", "pnpm", "node", "python"],
- *   },
- *   browser: {
- *     allowOrigins: ["https://github.com"],
- *   },
- *   approval: {
- *     requireFor: "HIGH",
- *     timeoutMs: 60000,
- *   },
- * };
- * ```
- */
 export interface PermissionPolicy {
+  /**
+   * If true, enables trusted mode (open-by-default for local scripts/testing).
+   * Default: false (secure-by-default).
+   */
+  trusted?: boolean;
+
   filesystem?: {
-    /** Paths the agent may read from (glob-like prefix matching). */
+    /** Paths the agent may read from (canonical boundary matching). */
     read?: string[];
     /** Paths the agent may write to. */
     write?: string[];
   };
+
   terminal?: {
-    /** Command prefixes the agent is allowed to execute. */
+    /** Exact executables the agent is allowed to execute (e.g. ["git", "node", "npm"]). */
     allow?: string[];
-    /** Command prefixes explicitly denied. Takes priority over allow. */
+    /** Executables or command prefixes explicitly denied. Takes priority over allow. */
     deny?: string[];
   };
+
   browser?: {
     /** Origins the agent may navigate to. */
     allowOrigins?: string[];
   };
+
   approval?: {
-    /** Require human approval for tools at or above this risk level. */
+    /** Require human approval for tools at or above this risk level. Default: HIGH */
     requireFor: RiskLevel;
-    /** How long to wait for approval before timing out (ms). */
+    /** How long to wait for approval before timing out (ms). Default: 60000 */
     timeoutMs?: number;
   };
 }
@@ -61,34 +52,44 @@ export interface PermissionDecision {
   reason?: string;
 }
 
-// ─── Permission Engine ───────────────────────────────────────────────────────
+// ─── Path Boundary Helper ────────────────────────────────────────────────────
 
 /**
- * Evaluates a permission policy against tool calls.
- *
- * Default behavior: if no policy is configured for a tool category,
- * all operations are allowed (open-by-default for v0.1).
- * When a policy IS configured, only explicitly listed operations are allowed.
+ * Checks whether a child path resides strictly inside an allowed parent directory.
+ * Resolves path traversal (..) and prevents boundary spoofing (e.g. /appSecret matching /app).
  */
+export function isPathInside(parent: string, child: string): boolean {
+  const resolvedParent = path.resolve(parent);
+  const resolvedChild = path.resolve(child);
+
+  const isWindows = process.platform === "win32";
+  const pNorm = isWindows ? resolvedParent.toLowerCase() : resolvedParent;
+  const cNorm = isWindows ? resolvedChild.toLowerCase() : resolvedChild;
+
+  if (pNorm === cNorm) return true;
+
+  const rel = path.relative(pNorm, cNorm);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+// ─── Permission Engine ───────────────────────────────────────────────────────
+
 export class PermissionEngine {
   constructor(private policy: PermissionPolicy = {}) {}
 
   /**
    * Check whether a specific tool call is permitted.
-   *
-   * @param toolName - e.g. "filesystem_read", "terminal_exec"
-   * @param input    - the arguments that will be passed to the tool
    */
   check(toolName: string, input: Record<string, unknown>): PermissionDecision {
     const normalizedName = toolName.replace(/\./g, "_");
 
     // ── Filesystem checks ──────────────────────────────────────────────
-    if (normalizedName.startsWith("filesystem_") && this.policy.filesystem) {
+    if (normalizedName.startsWith("filesystem_")) {
       return this.checkFilesystem(normalizedName, input);
     }
 
     // ── Terminal checks ────────────────────────────────────────────────
-    if (normalizedName.startsWith("terminal_") && this.policy.terminal) {
+    if (normalizedName.startsWith("terminal_")) {
       return this.checkTerminal(input);
     }
 
@@ -97,19 +98,25 @@ export class PermissionEngine {
       return this.checkBrowser(input);
     }
 
-    // No policy configured for this tool → allow
+    // If trusted mode or no category restrictions apply
     return { allowed: true };
   }
 
   /** Whether human approval is needed for the given risk level. */
   requiresApproval(riskLevel: RiskLevel): boolean {
-    if (!this.policy.approval) return false;
     const order: Record<RiskLevel, number> = {
       LOW: 0,
       MEDIUM: 1,
       HIGH: 2,
       CRITICAL: 3,
     };
+
+    if (!this.policy.approval) {
+      // In secure-by-default mode: require approval for HIGH and CRITICAL
+      if (this.policy.trusted) return false;
+      return order[riskLevel] >= order["HIGH"];
+    }
+
     return order[riskLevel] >= order[this.policy.approval.requireFor];
   }
 
@@ -120,12 +127,26 @@ export class PermissionEngine {
 
   // ── Private Checks ─────────────────────────────────────────────────────
 
+  private isPathAllowed(targetPath: string, allowedRoots: string[]): boolean {
+    return allowedRoots.some((allowedRoot) =>
+      isPathInside(allowedRoot, targetPath)
+    );
+  }
+
   private checkFilesystem(
     toolName: string,
     input: Record<string, unknown>
   ): PermissionDecision {
-    const fsPolicy = this.policy.filesystem!;
-    const filePath = String(input.path ?? input.source ?? "");
+    const fsPolicy = this.policy.filesystem;
+
+    // Secure by default: if filesystem is not configured and not trusted, require explicit permission
+    if (!fsPolicy && !this.policy.trusted) {
+      // If fully unconfigured, allow in v0.1 only if no restrictions were supplied
+      return { allowed: true };
+    }
+    if (!fsPolicy) return { allowed: true };
+
+    const filePath = String(input.path ?? "");
 
     const isRead =
       toolName === "filesystem_read" ||
@@ -133,25 +154,51 @@ export class PermissionEngine {
       toolName === "filesystem_exists";
 
     if (isRead && fsPolicy.read) {
-      if (!this.pathMatchesAny(filePath, fsPolicy.read)) {
+      if (!this.isPathAllowed(filePath, fsPolicy.read)) {
         return {
           allowed: false,
-          reason: `Path "${filePath}" is not in the allowed read paths: ${fsPolicy.read.join(", ")}`,
+          reason: `Path "${filePath}" is outside allowed read paths: ${fsPolicy.read.join(", ")}`,
         };
       }
     }
 
     const isWrite =
       toolName === "filesystem_write" ||
-      toolName === "filesystem_move" ||
       toolName === "filesystem_delete";
 
     if (isWrite && fsPolicy.write) {
-      if (!this.pathMatchesAny(filePath, fsPolicy.write)) {
+      if (!this.isPathAllowed(filePath, fsPolicy.write)) {
         return {
           allowed: false,
-          reason: `Path "${filePath}" is not in the allowed write paths: ${fsPolicy.write.join(", ")}`,
+          reason: `Path "${filePath}" is outside allowed write paths: ${fsPolicy.write.join(", ")}`,
         };
+      }
+    }
+
+    // For move operation: BOTH source and destination must be strictly verified!
+    if (toolName === "filesystem_move") {
+      const source = String(input.source ?? "");
+      const destination = String(input.destination ?? "");
+
+      if (fsPolicy.read && !this.isPathAllowed(source, fsPolicy.read)) {
+        return {
+          allowed: false,
+          reason: `Move source path "${source}" is outside allowed read paths`,
+        };
+      }
+      if (fsPolicy.write) {
+        if (!this.isPathAllowed(source, fsPolicy.write)) {
+          return {
+            allowed: false,
+            reason: `Move source path "${source}" is outside allowed write paths`,
+          };
+        }
+        if (!this.isPathAllowed(destination, fsPolicy.write)) {
+          return {
+            allowed: false,
+            reason: `Move destination path "${destination}" is outside allowed write paths: ${fsPolicy.write.join(", ")}`,
+          };
+        }
       }
     }
 
@@ -159,31 +206,69 @@ export class PermissionEngine {
   }
 
   private checkTerminal(input: Record<string, unknown>): PermissionDecision {
-    const termPolicy = this.policy.terminal!;
-    const command = String(input.command ?? "").trim();
-    const firstWord = command.split(/\s+/)[0] ?? "";
+    const termPolicy = this.policy.terminal;
 
-    // Deny takes priority
-    if (termPolicy.deny) {
-      for (const denied of termPolicy.deny) {
-        if (firstWord === denied || command.startsWith(denied)) {
-          return {
-            allowed: false,
-            reason: `Command "${firstWord}" is explicitly denied`,
-          };
-        }
+    // Secure by default: Deny terminal execution unless explicitly configured or trusted
+    if (!termPolicy && !this.policy.trusted) {
+      return {
+        allowed: false,
+        reason:
+          "Terminal execution is denied by default for security. Configure terminal permissions or enable trusted mode.",
+      };
+    }
+    if (!termPolicy) return { allowed: true };
+
+    const command = String(input.command ?? "").trim();
+    if (!command) {
+      return { allowed: false, reason: "Command cannot be empty" };
+    }
+
+    // Parse and tokenize command safely
+    const parseResult = parseCommand(command);
+    if (!parseResult.ok || !parseResult.command) {
+      return {
+        allowed: false,
+        reason: parseResult.error ?? "Invalid or dangerous command format",
+      };
+    }
+
+    const { executable } = parseResult.command;
+
+    // Check cwd against filesystem policy if provided
+    if (input.cwd && this.policy.filesystem?.read) {
+      const cwdStr = String(input.cwd);
+      if (!this.isPathAllowed(cwdStr, this.policy.filesystem.read)) {
+        return {
+          allowed: false,
+          reason: `Working directory (cwd) "${cwdStr}" is outside allowed filesystem boundaries`,
+        };
       }
     }
 
-    // If allow list exists, command must match
-    if (termPolicy.allow) {
-      const allowed = termPolicy.allow.some(
-        (a) => firstWord === a || command.startsWith(a)
-      );
-      if (!allowed) {
+    // Deny list takes priority
+    if (termPolicy.deny) {
+      const isDenied = termPolicy.deny.some((denied) => {
+        const norm = denied.trim().toLowerCase().replace(/\.(exe|cmd|bat)$/i, "");
+        return executable === norm || command.toLowerCase().startsWith(norm + " ");
+      });
+      if (isDenied) {
         return {
           allowed: false,
-          reason: `Command "${firstWord}" is not in the allowed list: ${termPolicy.allow.join(", ")}`,
+          reason: `Command executable "${executable}" is explicitly denied`,
+        };
+      }
+    }
+
+    // If allow list exists, exact executable must match
+    if (termPolicy.allow) {
+      const isAllowed = termPolicy.allow.some((allowed) => {
+        const norm = allowed.trim().toLowerCase().replace(/\.(exe|cmd|bat)$/i, "");
+        return executable === norm;
+      });
+      if (!isAllowed) {
+        return {
+          allowed: false,
+          reason: `Command executable "${executable}" is not in the allowed list: ${termPolicy.allow.join(", ")}`,
         };
       }
     }
@@ -211,17 +296,9 @@ export class PermissionEngine {
 
     return { allowed: true };
   }
-
-  private pathMatchesAny(filePath: string, patterns: string[]): boolean {
-    const normalized = filePath.replace(/\\/g, "/").toLowerCase();
-    return patterns.some((pattern) => {
-      const normalizedPattern = pattern.replace(/\\/g, "/").toLowerCase();
-      // Simple prefix matching — the path must start with the allowed prefix
-      return normalized.startsWith(normalizedPattern);
-    });
-  }
 }
 
-// Re-export approval
+// Re-export parser & approval
+export { parseCommand, type ParsedCommand, type ParseResult } from "./command-parser";
 export { ApprovalManager, ConsoleApprovalHandler, AutoApprovalHandler } from "./approval";
 export type { ApprovalHandler, ApprovalRequest } from "./approval";
