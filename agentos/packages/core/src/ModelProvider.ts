@@ -42,6 +42,8 @@ export interface ModelRequest {
   maxTokens?: number;
   /** Override the default model identifier. */
   model?: string;
+  /** Optional cancellation signal for aborting active model calls. */
+  signal?: AbortSignal;
 }
 
 /** Token usage counters returned alongside a response. */

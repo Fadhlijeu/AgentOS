@@ -18,6 +18,10 @@ export interface PersistenceStore {
   getRun(runId: string): RunRecord | null;
   getRecentRuns(limit?: number): RunRecord[];
 
+  // Tool Calls
+  saveToolCall(toolCall: ToolCallRecord): void;
+  getToolCallsByRun(runId: string): ToolCallRecord[];
+
   // State (key-value)
   saveState(key: string, value: unknown): void;
   getState(key: string): unknown | null;
@@ -25,6 +29,18 @@ export interface PersistenceStore {
 
   // Cleanup
   close(): void;
+}
+
+export interface ToolCallRecord {
+  id: string;
+  runId: string;
+  taskId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  result: string | null;
+  durationMs: number;
+  error: string | null;
+  timestamp: number;
 }
 
 export interface RunRecord {
@@ -93,6 +109,21 @@ export class SQLiteStore implements PersistenceStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
+
+      CREATE TABLE IF NOT EXISTS tool_calls (
+        id           TEXT PRIMARY KEY,
+        run_id       TEXT NOT NULL,
+        task_id      TEXT NOT NULL,
+        tool_name    TEXT NOT NULL,
+        arguments    TEXT NOT NULL DEFAULT '{}',
+        result       TEXT,
+        duration_ms  INTEGER NOT NULL DEFAULT 0,
+        error        TEXT,
+        timestamp    INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tool_calls_run_id ON tool_calls(run_id);
+      CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_name ON tool_calls(tool_name);
 
       CREATE TABLE IF NOT EXISTS state (
         key      TEXT PRIMARY KEY,
@@ -169,6 +200,36 @@ export class SQLiteStore implements PersistenceStore {
     return rows.map(this.rowToRun);
   }
 
+  // ── Tool Calls ─────────────────────────────────────────────────────────
+
+  saveToolCall(toolCall: ToolCallRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO tool_calls
+        (id, run_id, task_id, tool_name, arguments, result, duration_ms, error, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      toolCall.id,
+      toolCall.runId,
+      toolCall.taskId,
+      toolCall.toolName,
+      JSON.stringify(toolCall.arguments || {}),
+      toolCall.result,
+      toolCall.durationMs,
+      toolCall.error,
+      toolCall.timestamp
+    );
+  }
+
+  getToolCallsByRun(runId: string): ToolCallRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY timestamp ASC"
+      )
+      .all(runId) as any[];
+    return rows.map(this.rowToToolCall);
+  }
+
   // ── State ──────────────────────────────────────────────────────────────
 
   saveState(key: string, value: unknown): void {
@@ -221,6 +282,20 @@ export class SQLiteStore implements PersistenceStore {
       completedAt: row.completed_at,
       iterations: row.iterations,
       totalTokens: row.total_tokens,
+    };
+  }
+
+  private rowToToolCall(row: any): ToolCallRecord {
+    return {
+      id: row.id,
+      runId: row.run_id,
+      taskId: row.task_id,
+      toolName: row.tool_name,
+      arguments: JSON.parse(row.arguments || "{}"),
+      result: row.result,
+      durationMs: row.duration_ms,
+      error: row.error,
+      timestamp: row.timestamp,
     };
   }
 }

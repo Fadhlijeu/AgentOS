@@ -66,6 +66,10 @@ export class MockModelProvider implements ModelProvider {
   }
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
+    if (request.signal?.aborted) {
+      throw new DOMException("The operation was aborted", "AbortError");
+    }
+
     this.requests.push(request);
 
     if (this.handler) {

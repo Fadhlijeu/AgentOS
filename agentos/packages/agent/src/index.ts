@@ -1,9 +1,8 @@
 // ─── @agentos/agent ──────────────────────────────────────────────────────────
 // The main Agent class — the entry point for AgentOS.
 //
-// This is where everything comes together: the Agent orchestrates the
-// model provider, planner, tools, permissions, approval, events, memory,
-// storage, and observability into a single coherent execution loop.
+// Orchestrates the model provider, planner, tools, permissions, approval,
+// events, memory, storage, observability, and per-run execution lifecycles.
 //
 // Usage:
 //   const agent = new Agent({
@@ -36,8 +35,18 @@ import {
 } from "@agentos/permissions";
 import { ReActPlanner, type Planner, type PlannerDecision } from "@agentos/planner";
 import { MemoryManager } from "@agentos/memory";
-import { SQLiteStore, type PersistenceStore } from "@agentos/storage";
+import {
+  SQLiteStore,
+  type PersistenceStore,
+  type ToolCallRecord,
+} from "@agentos/storage";
 import { Tracer } from "@agentos/observability";
+import {
+  RunContext,
+  RunStateMachine,
+  IllegalStateTransitionError,
+  type AgentRun,
+} from "@agentos/runtime";
 
 // ─── Agent Configuration ─────────────────────────────────────────────────────
 
@@ -74,12 +83,13 @@ export class Agent {
   private store: PersistenceStore;
   private tracer: Tracer;
 
-  private status: AgentStatus = "IDLE";
   private maxIterations: number;
   private verbose: boolean;
 
-  // Track token usage across the run
-  private runUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  // Active runs isolation (concurrent run safety)
+  private activeRuns = new Map<string, RunContext>();
+  private lastRun?: RunContext;
+  private pendingStatus: AgentStatus = "IDLE";
 
   constructor(config: AgentConfig) {
     this.model = config.model;
@@ -157,263 +167,87 @@ export class Agent {
   // ─── Public API ────────────────────────────────────────────────────────
 
   /**
-   * Run a task. This is the main entry point — it starts the ReAct loop
-   * and returns when the agent produces a final answer, hits the iteration
-   * limit, or encounters an unrecoverable error.
+   * Start a task asynchronously and return an AgentRun handle immediately.
+   * This provides an isolated RunContext with its own lifecycle, cancellation signal,
+   * state machine, and result promise. Multiple runs can execute concurrently.
    */
-  async run(task: string): Promise<AgentResult> {
+  start(task: string): AgentRun {
     const runId = generateId("run");
     const taskId = generateId("task");
-    const startTime = Date.now();
-    this.status = "RUNNING";
-    this.runUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-
-    // Clear working memory from previous runs
-    await this.memory.clearWorking();
-
-    // Emit start events
-    this.eventBus.emit("agent.started", { runId, taskId, data: { task, model: this.model.name } });
-    this.eventBus.emit("task.started", { runId, taskId, data: { task } });
-    this.tracer.recordTaskStart(runId, taskId, task, this.model.name);
-
-    // Save run record
-    this.store.saveRun({
+    const runContext = new RunContext({
       runId,
       taskId,
       task,
-      status: "RUNNING",
-      output: null,
-      error: null,
-      startedAt: startTime,
-      completedAt: null,
-      iterations: 0,
-      totalTokens: 0,
+      eventBus: this.eventBus,
     });
 
-    // Build initial messages
-    const messages: ModelMessage[] = [
-      { role: "user", content: task },
-    ];
-
-    let finalAnswer: string | null = null;
-    let iteration = 0;
-    let lastError: string | undefined;
-
-    try {
-      // ── ReAct Loop ─────────────────────────────────────────────────────
-      for (iteration = 0; iteration < this.maxIterations; iteration++) {
-        // Check if paused or cancelled (read through getter to defeat
-        // TypeScript's control-flow narrowing — status can change async)
-        const currentStatus = this.getStatus();
-        if (currentStatus === "PAUSED") {
-          await this.waitForResume();
-        }
-        if (this.getStatus() === "CANCELLED") {
-          break;
-        }
-
-        // Ask the planner what to do next
-        const plannerStart = Date.now();
-        const decision = await this.planner.decideNextAction({
-          task,
-          messages,
-          tools: this.toolRegistry.getModelDefinitions(),
-        });
-        const plannerDuration = Date.now() - plannerStart;
-
-        // Track token usage
-        const usage = (this.planner as ReActPlanner).getLastUsage?.();
-        if (usage) {
-          this.runUsage.promptTokens += usage.promptTokens;
-          this.runUsage.completionTokens += usage.completionTokens;
-          this.runUsage.totalTokens += usage.totalTokens;
-        }
-
-        this.tracer.recordPlannerCall(
-          runId,
-          taskId,
-          decision.type,
-          plannerDuration,
-          usage ? { prompt: usage.promptTokens, completion: usage.completionTokens, total: usage.totalTokens } : undefined
-        );
-
-        // ── Handle decision ────────────────────────────────────────────
-
-        if (decision.type === "final_answer") {
-          finalAnswer = decision.answer;
-          break;
-        }
-
-        if (decision.type === "error") {
-          lastError = decision.error;
-          this.tracer.recordError(runId, taskId, decision.error);
-          // Don't immediately fail — give the model another chance
-          messages.push({
-            role: "assistant",
-            content: `Error: ${decision.error}. Let me try a different approach.`,
-          });
-          continue;
-        }
-
-        if (decision.type === "tool_calls") {
-          // Add assistant message with tool calls to conversation
-          messages.push({
-            role: "assistant",
-            content: decision.reasoning,
-            toolCalls: decision.toolCalls,
-          });
-
-          // Execute each tool call
-          for (const toolCall of decision.toolCalls) {
-            const result = await this.executeTool(
-              toolCall,
-              runId,
-              taskId
-            );
-
-            // Add tool result to conversation
-            messages.push({
-              role: "tool",
-              content: result,
-              toolCallId: toolCall.id,
-            });
-          }
-        }
-      }
-
-      // ── Finalize ─────────────────────────────────────────────────────
-
-      if (iteration >= this.maxIterations && !finalAnswer) {
-        finalAnswer = `Task incomplete: reached maximum iterations (${this.maxIterations}). Last progress was logged in the trace.`;
-        this.status = "ERROR";
-      } else if (this.getStatus() === "CANCELLED") {
-        // Already cancelled — keep status
-      } else {
-        this.status = "COMPLETED";
-      }
-
-      const durationMs = Date.now() - startTime;
-
-      // Emit completion event
-      this.eventBus.emit("task.completed", {
-        runId,
-        taskId,
-        data: {
-          success: this.status === "COMPLETED",
-          iterations: iteration,
-          durationMs,
-        },
-      });
-
-      const events = this.eventBus.getEventsByRun(runId);
-
-      this.tracer.recordTaskEnd(runId, taskId, this.status === "COMPLETED", durationMs);
-
-      // Update run record
-      this.store.saveRun({
-        runId,
-        taskId,
-        task,
-        status: this.status,
-        output: finalAnswer,
-        error: lastError ?? null,
-        startedAt: startTime,
-        completedAt: Date.now(),
-        iterations: iteration,
-        totalTokens: this.runUsage.totalTokens,
-      });
-
-      // Print trace summary if verbose
-      if (this.verbose) {
-        this.tracer.printTrace(runId);
-      }
-
-      const result: AgentResult = {
-        success: this.status === "COMPLETED",
-        output: finalAnswer,
-        error: lastError,
-        taskId,
-        runId,
-        events,
-        usage: { ...this.runUsage },
-        iterations: iteration,
-        durationMs,
-      };
-
-      return result;
-    } catch (err) {
-      this.status = "ERROR";
-      const durationMs = Date.now() - startTime;
-      const errorMsg = (err as Error).message;
-
-      this.eventBus.emit("task.failed", {
-        runId,
-        taskId,
-        data: { error: errorMsg },
-      });
-
-      this.tracer.recordError(runId, taskId, errorMsg);
-      this.tracer.recordTaskEnd(runId, taskId, false, durationMs);
-
-      this.store.saveRun({
-        runId,
-        taskId,
-        task,
-        status: "ERROR",
-        output: null,
-        error: errorMsg,
-        startedAt: startTime,
-        completedAt: Date.now(),
-        iterations: iteration,
-        totalTokens: this.runUsage.totalTokens,
-      });
-
-      return {
-        success: false,
-        output: null,
-        error: errorMsg,
-        taskId,
-        runId,
-        events: this.eventBus.getEventsByRun(runId),
-        usage: { ...this.runUsage },
-        iterations: iteration,
-        durationMs,
-      };
+    if (this.pendingStatus === "CANCELLED") {
+      runContext.cancel();
+      this.pendingStatus = "IDLE";
     }
+
+    this.activeRuns.set(runId, runContext);
+    this.lastRun = runContext;
+
+    // Execute run in background
+    this.executeRun(runContext).catch((err) => {
+      runContext.fail(err);
+    });
+
+    return runContext;
   }
 
-  /** Pause the agent (will pause at the next iteration boundary). */
+  /**
+   * Run a task and await completion. Starts the ReAct loop and returns when the
+   * agent produces a final answer, hits the iteration limit, or is cancelled/errors.
+   */
+  async run(task: string): Promise<AgentResult> {
+    const run = this.start(task);
+    return run.result;
+  }
+
+  /**
+   * Pause execution of the most recently started task run.
+   */
   async pause(): Promise<void> {
-    if (this.status === "RUNNING") {
-      this.status = "PAUSED";
-      this.eventBus.emit("agent.paused", {
-        runId: "",
-        taskId: "",
-        data: {},
-      });
+    if (this.lastRun) {
+      await this.lastRun.pause();
     }
   }
 
-  /** Resume a paused agent. */
+  /**
+   * Resume execution of the most recently paused task run.
+   */
   async resume(): Promise<void> {
-    if (this.status === "PAUSED") {
-      this.status = "RUNNING";
-      this.eventBus.emit("agent.resumed", {
-        runId: "",
-        taskId: "",
-        data: {},
-      });
+    if (this.lastRun) {
+      await this.lastRun.resume();
     }
   }
 
-  /** Cancel the current run. */
+  /**
+   * Cancel the most recently started task run immediately, propagating AbortSignal
+   * to any running tool processes or LLM requests.
+   */
   async cancel(): Promise<void> {
-    this.status = "CANCELLED";
+    this.pendingStatus = "CANCELLED";
+    if (this.lastRun) {
+      await this.lastRun.cancel();
+    }
   }
 
-  /** Get the current agent status. */
+  /** Get the current status of the most recent run (or pending status). */
   getStatus(): AgentStatus {
-    return this.status;
+    return this.lastRun?.status ?? this.pendingStatus;
+  }
+
+  /** Get a specific run by its runId. */
+  getRun(runId: string): AgentRun | undefined {
+    return this.activeRuns.get(runId);
+  }
+
+  /** Get all active runs. */
+  getActiveRuns(): AgentRun[] {
+    return Array.from(this.activeRuns.values());
   }
 
   /** Get the event bus (for external listeners). */
@@ -438,15 +272,301 @@ export class Agent {
     this.store.close();
   }
 
+  // ─── Execution Engine ──────────────────────────────────────────────────
+
+  private async executeRun(runContext: RunContext): Promise<void> {
+    const { runId, taskId, task, signal } = runContext;
+    const startTime = runContext.startTime;
+
+    try {
+      if (runContext.isCancelled()) {
+        const finalAnswer = "Task cancelled by user.";
+        this.store.saveRun({
+          runId,
+          taskId,
+          task,
+          status: "CANCELLED",
+          output: finalAnswer,
+          error: null,
+          startedAt: startTime,
+          completedAt: Date.now(),
+          iterations: 0,
+          totalTokens: 0,
+        });
+
+        const result: AgentResult = {
+          success: false,
+          output: finalAnswer,
+          error: undefined,
+          taskId,
+          runId,
+          events: this.eventBus.getEventsByRun(runId),
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          iterations: 0,
+          durationMs: 0,
+        };
+
+        runContext.complete(result);
+        return;
+      }
+
+      runContext.start();
+
+      // Clear working memory for this task
+      await this.memory.clearWorking();
+
+      // Emit start events
+      this.eventBus.emit("agent.started", {
+        runId,
+        taskId,
+        data: { task, model: this.model.name },
+      });
+      this.eventBus.emit("task.started", { runId, taskId, data: { task } });
+      this.tracer.recordTaskStart(runId, taskId, task, this.model.name);
+
+      // Save initial run record to persistence store
+      this.store.saveRun({
+        runId,
+        taskId,
+        task,
+        status: "RUNNING",
+        output: null,
+        error: null,
+        startedAt: startTime,
+        completedAt: null,
+        iterations: 0,
+        totalTokens: 0,
+      });
+
+      let finalAnswer: string | null = null;
+      let lastError: string | undefined;
+
+      // ── ReAct Loop ─────────────────────────────────────────────────────
+      for (
+        runContext.iteration = 0;
+        runContext.iteration < this.maxIterations;
+        runContext.iteration++
+      ) {
+        // Handle PAUSED state
+        if (runContext.getStatus() === "PAUSED") {
+          await runContext.waitForResume();
+        }
+
+        // Handle CANCELLED state or AbortSignal
+        if (runContext.isCancelled()) {
+          break;
+        }
+
+        // Ask the planner what to do next
+        const plannerStart = Date.now();
+        const decision = await this.planner.decideNextAction({
+          task,
+          messages: runContext.messages,
+          tools: this.toolRegistry.getModelDefinitions(),
+          signal,
+        });
+        const plannerDuration = Date.now() - plannerStart;
+
+        if (runContext.isCancelled()) {
+          break;
+        }
+
+        // Track token usage
+        const usage = (this.planner as ReActPlanner).getLastUsage?.();
+        if (usage) {
+          runContext.usage.promptTokens += usage.promptTokens;
+          runContext.usage.completionTokens += usage.completionTokens;
+          runContext.usage.totalTokens += usage.totalTokens;
+        }
+
+        this.tracer.recordPlannerCall(
+          runId,
+          taskId,
+          decision.type,
+          plannerDuration,
+          usage
+            ? {
+                prompt: usage.promptTokens,
+                completion: usage.completionTokens,
+                total: usage.totalTokens,
+              }
+            : undefined
+        );
+
+        // ── Handle decision ────────────────────────────────────────────
+
+        if (decision.type === "final_answer") {
+          finalAnswer = decision.answer;
+          break;
+        }
+
+        if (decision.type === "error") {
+          lastError = decision.error;
+          this.tracer.recordError(runId, taskId, decision.error);
+          runContext.messages.push({
+            role: "assistant",
+            content: `Error: ${decision.error}. Let me try a different approach.`,
+          });
+          continue;
+        }
+
+        if (decision.type === "tool_calls") {
+          // Add assistant message with tool calls to conversation
+          runContext.messages.push({
+            role: "assistant",
+            content: decision.reasoning,
+            toolCalls: decision.toolCalls,
+          });
+
+          // Execute each tool call
+          for (const toolCall of decision.toolCalls) {
+            if (runContext.isCancelled()) {
+              break;
+            }
+
+            const result = await this.executeTool(
+              toolCall,
+              runId,
+              taskId,
+              signal
+            );
+
+            // Add tool result to conversation
+            runContext.messages.push({
+              role: "tool",
+              content: result,
+              toolCallId: toolCall.id,
+            });
+          }
+        }
+      }
+
+      // ── Finalize ─────────────────────────────────────────────────────
+
+      const isCancelled = runContext.isCancelled();
+      if (isCancelled) {
+        finalAnswer = finalAnswer ?? "Task cancelled by user.";
+      } else if (runContext.iteration >= this.maxIterations && !finalAnswer) {
+        finalAnswer = `Task incomplete: reached maximum iterations (${this.maxIterations}). Last progress was logged in the trace.`;
+      }
+
+      const durationMs = Date.now() - startTime;
+      const isSuccess =
+        !isCancelled &&
+        finalAnswer !== null &&
+        !finalAnswer.startsWith("Task incomplete");
+
+      const finalStatus: AgentStatus = isCancelled
+        ? "CANCELLED"
+        : isSuccess
+        ? "COMPLETED"
+        : "ERROR";
+
+      // Emit completion event
+      this.eventBus.emit("task.completed", {
+        runId,
+        taskId,
+        data: {
+          success: isSuccess,
+          iterations: runContext.iteration,
+          durationMs,
+        },
+      });
+
+      const events = this.eventBus.getEventsByRun(runId);
+      this.tracer.recordTaskEnd(runId, taskId, isSuccess, durationMs);
+
+      // Update run record
+      this.store.saveRun({
+        runId,
+        taskId,
+        task,
+        status: finalStatus,
+        output: finalAnswer,
+        error: lastError ?? null,
+        startedAt: startTime,
+        completedAt: Date.now(),
+        iterations: runContext.iteration,
+        totalTokens: runContext.usage.totalTokens,
+      });
+
+      if (this.verbose) {
+        this.tracer.printTrace(runId);
+      }
+
+      const result: AgentResult = {
+        success: isSuccess,
+        output: finalAnswer,
+        error: lastError,
+        taskId,
+        runId,
+        events,
+        usage: { ...runContext.usage },
+        iterations: runContext.iteration,
+        durationMs,
+      };
+
+      if (finalStatus === "COMPLETED" || finalStatus === "CANCELLED") {
+        runContext.complete(result);
+      } else {
+        runContext.fail(
+          new Error(lastError || finalAnswer || "Task failed"),
+          result
+        );
+      }
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+      const errorMsg = (err as Error).message;
+
+      this.eventBus.emit("task.failed", {
+        runId,
+        taskId,
+        data: { error: errorMsg },
+      });
+
+      this.tracer.recordError(runId, taskId, errorMsg);
+      this.tracer.recordTaskEnd(runId, taskId, false, durationMs);
+
+      this.store.saveRun({
+        runId,
+        taskId,
+        task,
+        status: "ERROR",
+        output: null,
+        error: errorMsg,
+        startedAt: startTime,
+        completedAt: Date.now(),
+        iterations: runContext.iteration,
+        totalTokens: runContext.usage.totalTokens,
+      });
+
+      const result: AgentResult = {
+        success: false,
+        output: null,
+        error: errorMsg,
+        taskId,
+        runId,
+        events: this.eventBus.getEventsByRun(runId),
+        usage: { ...runContext.usage },
+        iterations: runContext.iteration,
+        durationMs,
+      };
+
+      runContext.fail(err, result);
+    }
+  }
+
   // ─── Private Methods ──────────────────────────────────────────────────
 
   /**
-   * Execute a single tool call with permission checks, approval, and tracing.
+   * Execute a single tool call with validation, permission checks, approval,
+   * cancellation awareness, and structured persistence.
    */
   private async executeTool(
     toolCall: ModelToolCall,
     runId: string,
-    taskId: string
+    taskId: string,
+    signal?: AbortSignal
   ): Promise<string> {
     const tool = this.toolRegistry.get(toolCall.name);
     if (!tool) {
@@ -530,6 +650,7 @@ export class Agent {
       taskId,
       emit: (event, data) =>
         this.eventBus.emit(event as any, { runId, taskId, data }),
+      signal,
     };
 
     const toolStart = Date.now();
@@ -559,6 +680,23 @@ export class Agent {
         },
       });
 
+      // Persist tool call record to storage
+      try {
+        this.store.saveToolCall({
+          id: generateId("call"),
+          runId,
+          taskId,
+          toolName: toolCall.name,
+          arguments: toolCall.arguments as Record<string, unknown>,
+          result,
+          durationMs: toolDuration,
+          error: null,
+          timestamp: toolStart,
+        });
+      } catch {
+        // Storage errors don't halt execution
+      }
+
       return result;
     } catch (err) {
       const toolDuration = Date.now() - toolStart;
@@ -582,25 +720,32 @@ export class Agent {
       this.eventBus.emit("tool.failed", {
         runId,
         taskId,
-        data: { toolName: toolCall.name, error: errorMsg, durationMs: toolDuration },
+        data: {
+          toolName: toolCall.name,
+          error: errorMsg,
+          durationMs: toolDuration,
+        },
       });
+
+      // Persist failed tool call record to storage
+      try {
+        this.store.saveToolCall({
+          id: generateId("call"),
+          runId,
+          taskId,
+          toolName: toolCall.name,
+          arguments: toolCall.arguments as Record<string, unknown>,
+          result: null,
+          durationMs: toolDuration,
+          error: errorMsg,
+          timestamp: toolStart,
+        });
+      } catch {
+        // Storage errors don't halt execution
+      }
 
       return `Error executing ${toolCall.name}: ${errorMsg}`;
     }
-  }
-
-  /** Wait until the agent is resumed (or cancelled). */
-  private waitForResume(): Promise<void> {
-    return new Promise((resolve) => {
-      const check = () => {
-        if (this.status !== "PAUSED") {
-          resolve();
-        } else {
-          setTimeout(check, 100);
-        }
-      };
-      check();
-    });
   }
 }
 
@@ -635,6 +780,8 @@ function createNoOpStore(): PersistenceStore {
     saveRun: () => {},
     getRun: () => null,
     getRecentRuns: () => [],
+    saveToolCall: () => {},
+    getToolCallsByRun: () => [],
     saveState: () => {},
     getState: () => null,
     deleteState: () => {},
@@ -652,5 +799,12 @@ export { ConsoleApprovalHandler, AutoApprovalHandler } from "@agentos/permission
 export { EventBus } from "@agentos/events";
 export { MemoryManager } from "@agentos/memory";
 export { SQLiteStore } from "@agentos/storage";
+export type { ToolCallRecord } from "@agentos/storage";
 export { Tracer } from "@agentos/observability";
 export { ReActPlanner } from "@agentos/planner";
+export {
+  RunContext,
+  RunStateMachine,
+  IllegalStateTransitionError,
+} from "@agentos/runtime";
+export type { AgentRun } from "@agentos/runtime";

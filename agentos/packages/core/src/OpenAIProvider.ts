@@ -54,7 +54,7 @@ export class OpenAIProvider implements ModelProvider {
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
     const body = this.buildRequestBody(request);
-    const raw = await this.fetchWithRetry(body);
+    const raw = await this.fetchWithRetry(body, 0, request.signal);
     return this.parseResponse(raw);
   }
 
@@ -153,8 +153,13 @@ export class OpenAIProvider implements ModelProvider {
 
   private async fetchWithRetry(
     body: Record<string, unknown>,
-    attempt = 0
+    attempt = 0,
+    signal?: AbortSignal
   ): Promise<any> {
+    if (signal?.aborted) {
+      throw new DOMException("The operation was aborted", "AbortError");
+    }
+
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.apiKey}`,
@@ -169,12 +174,16 @@ export class OpenAIProvider implements ModelProvider {
         method: "POST",
         headers,
         body: JSON.stringify(body),
+        signal,
       });
-    } catch (err) {
+    } catch (err: any) {
+      if (signal?.aborted || err.name === "AbortError") {
+        throw new DOMException("The operation was aborted", "AbortError");
+      }
       // Network-level error (DNS, timeout, etc.)
       if (attempt < this.maxRetries) {
         await this.backoff(attempt);
-        return this.fetchWithRetry(body, attempt + 1);
+        return this.fetchWithRetry(body, attempt + 1, signal);
       }
       throw new Error(
         `OpenAI request failed after ${this.maxRetries} retries: ${(err as Error).message}`
@@ -186,8 +195,11 @@ export class OpenAIProvider implements ModelProvider {
       (response.status === 429 || response.status >= 500) &&
       attempt < this.maxRetries
     ) {
+      if (signal?.aborted) {
+        throw new DOMException("The operation was aborted", "AbortError");
+      }
       await this.backoff(attempt);
-      return this.fetchWithRetry(body, attempt + 1);
+      return this.fetchWithRetry(body, attempt + 1, signal);
     }
 
     if (!response.ok) {

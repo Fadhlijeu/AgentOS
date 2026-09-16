@@ -25,6 +25,12 @@
 // ─── Agent Runtime ───────────────────────────────────────────────────────────
 export { Agent } from "@agentos/agent";
 export type { AgentConfig } from "@agentos/agent";
+export {
+  RunContext,
+  RunStateMachine,
+  IllegalStateTransitionError,
+} from "@agentos/runtime";
+export type { AgentRun, RunContextOptions } from "@agentos/runtime";
 
 // ─── Core Types & Enums ──────────────────────────────────────────────────────
 export type {
@@ -113,6 +119,7 @@ export { SQLiteStore } from "@agentos/storage";
 export type {
   PersistenceStore,
   RunRecord,
+  ToolCallRecord,
 } from "@agentos/storage";
 
 // ─── Observability & Tracing ─────────────────────────────────────────────────

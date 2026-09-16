@@ -65,6 +65,9 @@ importers:
       '@agentos/planner':
         specifier: workspace:*
         version: link:../planner
+      '@agentos/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@agentos/storage':
         specifier: workspace:*
         version: link:../storage
@@ -112,12 +115,12 @@ importers:
 
   agentos/packages/runtime:
     dependencies:
-      '@agentos/agent':
-        specifier: workspace:*
-        version: link:../agent
       '@agentos/core':
         specifier: workspace:*
         version: link:../core
+      '@agentos/events':
+        specifier: workspace:*
+        version: link:../events
 
   agentos/packages/sdk:
     dependencies:
@@ -142,6 +145,9 @@ importers:
       '@agentos/planner':
         specifier: workspace:*
         version: link:../planner
+      '@agentos/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@agentos/storage':
         specifier: workspace:*
         version: link:../storage

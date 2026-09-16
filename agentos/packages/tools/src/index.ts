@@ -14,6 +14,8 @@ export interface ToolContext {
   taskId: string;
   /** Emit an event during tool execution. */
   emit: (event: string, data: Record<string, unknown>) => void;
+  /** Optional cancellation signal for aborting active tool execution. */
+  signal?: AbortSignal;
 }
 
 import { z } from "zod";

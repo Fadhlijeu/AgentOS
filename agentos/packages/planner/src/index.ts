@@ -23,6 +23,8 @@ export interface PlannerContext {
   messages: ModelMessage[];
   /** Tool definitions available to the agent. */
   tools: ModelToolDefinition[];
+  /** Optional cancellation signal. */
+  signal?: AbortSignal;
 }
 
 /** The planner's decision: call one or more tools, or return a final answer. */
@@ -119,6 +121,7 @@ export class ReActPlanner implements Planner {
         messages,
         tools: context.tools.length > 0 ? context.tools : undefined,
         temperature: 0.1, // Low temperature for consistent tool-use decisions
+        signal: context.signal,
       });
 
       // Track token usage

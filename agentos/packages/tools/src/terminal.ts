@@ -46,7 +46,7 @@ function terminalExec(): Tool {
     riskLevel: "HIGH",
     async execute(
       input: Record<string, unknown>,
-      _ctx: ToolContext
+      ctx: ToolContext
     ): Promise<string> {
       // 1. Validate input schema
       const parsedInput = terminalExecSchema.safeParse(input);
@@ -64,18 +64,67 @@ function terminalExec(): Tool {
         return `Security Error: ${parseResult.error ?? "Invalid command format"}`;
       }
 
+      if (ctx.signal?.aborted) {
+        return "Error: Command aborted by cancellation signal";
+      }
+
       const { executable, args } = parseResult.command;
 
       // 3. Execute with controlled spawn
       return new Promise<string>((resolve) => {
         const isWindows = process.platform === "win32";
+        let aborted = false;
+
+        // On Windows, shell built-ins need cmd.exe, whereas standalone binaries run directly
+        const CMD_BUILTINS = new Set([
+          "dir",
+          "copy",
+          "type",
+          "del",
+          "move",
+          "mkdir",
+          "md",
+          "rmdir",
+          "rd",
+          "cls",
+          "ver",
+        ]);
+        const needsShell = isWindows && CMD_BUILTINS.has(executable.toLowerCase());
 
         // Spawn child process with isolated args vector
         const child = spawn(executable, args, {
           cwd,
-          shell: isWindows,
+          shell: needsShell,
           windowsHide: true,
         });
+
+        const killChild = () => {
+          try {
+            if (isWindows && child.pid && needsShell) {
+              try {
+                spawn("taskkill", ["/pid", child.pid.toString(), "/t", "/f"], {
+                  windowsHide: true,
+                });
+              } catch {
+                // ignore
+              }
+            }
+            child.kill("SIGTERM");
+            child.kill("SIGKILL");
+            child.kill();
+          } catch {
+            // ignore
+          }
+        };
+
+        const onAbort = () => {
+          aborted = true;
+          killChild();
+        };
+
+        if (ctx.signal) {
+          ctx.signal.addEventListener("abort", onAbort, { once: true });
+        }
 
         let stdout = "";
         let stderr = "";
@@ -83,11 +132,7 @@ function terminalExec(): Tool {
 
         const timer = setTimeout(() => {
           killedByTimeout = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            // ignore
-          }
+          killChild();
         }, timeout);
 
         child.stdout?.on("data", (chunk) => {
@@ -100,11 +145,26 @@ function terminalExec(): Tool {
 
         child.on("error", (err) => {
           clearTimeout(timer);
-          resolve(`Error executing command "${command}": ${err.message}`);
+          if (ctx.signal) {
+            ctx.signal.removeEventListener("abort", onAbort);
+          }
+          if (aborted || ctx.signal?.aborted) {
+            resolve("Error: Command aborted by cancellation signal");
+          } else {
+            resolve(`Error executing command "${command}": ${err.message}`);
+          }
         });
 
         child.on("close", (code) => {
           clearTimeout(timer);
+          if (ctx.signal) {
+            ctx.signal.removeEventListener("abort", onAbort);
+          }
+
+          if (aborted || ctx.signal?.aborted) {
+            resolve("Error: Command aborted by cancellation signal");
+            return;
+          }
 
           if (killedByTimeout) {
             resolve(
