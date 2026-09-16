@@ -24,10 +24,10 @@ This project incorporates code and dependencies from the following open-source r
 - **Repository**: https://github.com/openinterpreter/openinterpreter
 - **Upstream URL**: https://github.com/openinterpreter/openinterpreter
 - **License**: Apache-2.0 (verified in upstream repository)
-- **Original version/commit**: Clone attempted but timed out; directory is empty
-- **What is reused**: N/A (clone failed, will integrate through adapter pattern)
-- **What was modified**: N/A
-- **Attribution**: Project is Apache-2.0 licensed; exact commit/tag to be determined upon successful clone.
+- **Original version/commit**: 5db50b2e93224dda720462f02fc2858cbd112eb5 (shallow clone HEAD of main)
+- **What is reused**: Terminal code execution engine, local interpreter workflows, system automation patterns
+- **What was modified**: N/A (freshly cloned, no modifications yet)
+- **Attribution**: Copyright (c) 2026 Open Interpreter contributors. Apache-2.0 License.
 
 ## Project: Open Browser Use
 - **Repository**: https://github.com/open-browser-use/open-browser-use
