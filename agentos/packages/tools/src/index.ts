@@ -38,7 +38,7 @@ export interface Tool<TInput = Record<string, unknown>> {
   /** JSON Schema for the tool's input parameters (for LLM prompt). */
   parameters: Record<string, unknown>;
   /** Optional runtime Zod schema for validating tool arguments before execution. */
-  schema?: z.ZodType<TInput>;
+  schema?: z.ZodType<TInput, any, any>;
   /** Risk level — determines whether human approval is required. */
   riskLevel: RiskLevel;
   /**
@@ -123,3 +123,5 @@ export class ToolRegistry {
 
 export { filesystemTools } from "./filesystem";
 export { terminalTools } from "./terminal";
+export { httpTools, httpRequestSchema } from "./http";
+export type { HttpRequestInput } from "./http";

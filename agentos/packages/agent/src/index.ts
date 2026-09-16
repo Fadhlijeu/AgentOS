@@ -7,7 +7,7 @@
 // Usage:
 //   const agent = new Agent({
 //     model: new OpenAIProvider({ apiKey }),
-//     tools: [...filesystemTools(), ...terminalTools()],
+//     tools: [...filesystemTools(), ...terminalTools(), ...httpTools()],
 //   });
 //   const result = await agent.run("Find PDFs in Downloads and summarize them");
 
@@ -24,7 +24,14 @@ import {
 } from "@agentos/core";
 
 import { EventBus } from "@agentos/events";
-import { ToolRegistry, type Tool, type ToolContext } from "@agentos/tools";
+import {
+  ToolRegistry,
+  type Tool,
+  type ToolContext,
+  filesystemTools,
+  terminalTools,
+  httpTools,
+} from "@agentos/tools";
 import {
   PermissionEngine,
   ApprovalManager,
@@ -34,11 +41,17 @@ import {
   type ApprovalHandler,
 } from "@agentos/permissions";
 import { ReActPlanner, type Planner, type PlannerDecision } from "@agentos/planner";
-import { MemoryManager } from "@agentos/memory";
+import {
+  MemoryManager,
+  SQLiteMemoryStore,
+  type MemoryEntry,
+} from "@agentos/memory";
 import {
   SQLiteStore,
   type PersistenceStore,
   type ToolCallRecord,
+  type RunRecord,
+  type MemoryRecord,
 } from "@agentos/storage";
 import { Tracer } from "@agentos/observability";
 import {
@@ -55,14 +68,18 @@ export interface AgentConfig {
   model: ModelProvider;
   /** Tools available to the agent. */
   tools?: Tool[];
-  /** Permission policy (optional — defaults to fully open). */
+  /** Permission policy (optional — defaults to secure-by-default). */
   permissions?: PermissionPolicy;
-  /** Custom approval handler (optional — defaults to auto-approve). */
+  /** Custom approval handler (optional — defaults to console prompt in secure mode). */
   approvalHandler?: ApprovalHandler;
   /** Custom planner (optional — defaults to ReActPlanner). */
   planner?: Planner;
+  /** Custom memory manager (optional — defaults to SQLiteMemoryStore backed by dbPath). */
+  memory?: MemoryManager;
   /** SQLite database path (optional — defaults to in-memory). */
   dbPath?: string;
+  /** Persistence failure policy: "required" fails fast on storage errors, "best-effort" degrades gracefully. Default: "best-effort" */
+  persistenceMode?: "required" | "best-effort";
   /** Maximum reasoning iterations per run (default: 25). */
   maxIterations?: number;
   /** Whether to print trace output to console (default: true). */
@@ -85,6 +102,7 @@ export class Agent {
 
   private maxIterations: number;
   private verbose: boolean;
+  private persistenceMode: "required" | "best-effort";
 
   // Active runs isolation (concurrent run safety)
   private activeRuns = new Map<string, RunContext>();
@@ -95,6 +113,7 @@ export class Agent {
     this.model = config.model;
     this.maxIterations = config.maxIterations ?? 25;
     this.verbose = config.verbose ?? true;
+    this.persistenceMode = config.persistenceMode ?? "best-effort";
 
     // Event bus — the nervous system
     this.eventBus = new EventBus();
@@ -123,16 +142,18 @@ export class Agent {
     // Planner
     this.planner = config.planner ?? new ReActPlanner(this.model);
 
-    // Memory
-    this.memory = new MemoryManager();
-
-    // Storage — fail-fast if an explicit database path was requested
+    // Storage — fail-fast if explicit dbPath requested or persistenceMode is required
     if (config.dbPath && config.dbPath !== ":memory:") {
       this.store = new SQLiteStore(config.dbPath);
     } else {
       try {
         this.store = new SQLiteStore(":memory:");
       } catch (err) {
+        if (this.persistenceMode === "required") {
+          throw new Error(
+            `Failed to initialize SQLiteStore: ${(err as Error).message}`
+          );
+        }
         if (this.verbose) {
           console.warn(
             "[Agent] SQLite in-memory unavailable, using no-op storage:",
@@ -143,6 +164,10 @@ export class Agent {
       }
     }
 
+    // Memory — backed by SQLiteStore for durable persistence across runs
+    this.memory =
+      config.memory ?? new MemoryManager(new SQLiteMemoryStore(this.store));
+
     // Observability
     this.tracer = new Tracer(this.eventBus);
 
@@ -150,8 +175,10 @@ export class Agent {
     this.eventBus.onAny((event: AgentEvent) => {
       try {
         this.store.saveEvent(event);
-      } catch {
-        // Don't let storage errors kill the agent loop
+      } catch (err) {
+        if (this.persistenceMode === "required") {
+          throw err;
+        }
       }
     });
 
@@ -250,6 +277,11 @@ export class Agent {
     return Array.from(this.activeRuns.values());
   }
 
+  /** Get the memory manager. */
+  getMemory(): MemoryManager {
+    return this.memory;
+  }
+
   /** Get the event bus (for external listeners). */
   getEventBus(): EventBus {
     return this.eventBus;
@@ -263,6 +295,25 @@ export class Agent {
   /** Get the persistence store. */
   getStore(): PersistenceStore {
     return this.store;
+  }
+
+  /**
+   * Reconstruct and replay the full execution history of a specific runId,
+   * returning the recorded run, timeline events, and tool calls.
+   */
+  async replay(runId: string): Promise<{
+    run: RunRecord | null;
+    events: AgentEvent[];
+    toolCalls: ToolCallRecord[];
+  }> {
+    const run = this.store.getRun(runId);
+    const events = this.store.getEventsByRun(runId);
+    const toolCalls = this.store.getToolCallsByRun(runId);
+    return {
+      run,
+      events,
+      toolCalls,
+    };
   }
 
   /** Clean up resources. Call when done using the agent. */
@@ -314,6 +365,17 @@ export class Agent {
 
       // Clear working memory for this task
       await this.memory.clearWorking();
+
+      // 1. Context Retrieval from Memory:
+      // Query durable long-term and semantic memory for relevant past knowledge
+      const relevantMemories = await this.memory.retrieve(task, 5);
+      if (relevantMemories.length > 0) {
+        const memoryPrompt = this.memory.formatContextForPrompt(relevantMemories);
+        runContext.messages.unshift({
+          role: "system",
+          content: memoryPrompt,
+        });
+      }
 
       // Emit start events
       this.eventBus.emit("agent.started", {
@@ -371,8 +433,8 @@ export class Agent {
           break;
         }
 
-        // Track token usage
-        const usage = (this.planner as ReActPlanner).getLastUsage?.();
+        // Track token usage directly from planner
+        const usage = this.planner.getLastUsage();
         if (usage) {
           runContext.usage.promptTokens += usage.promptTokens;
           runContext.usage.completionTokens += usage.completionTokens;
@@ -489,6 +551,33 @@ export class Agent {
         iterations: runContext.iteration,
         totalTokens: runContext.usage.totalTokens,
       });
+
+      // 2. Remember task outcome in durable long-term memory
+      try {
+        await this.memory.remember(
+          "long-term",
+          `task_outcome:${taskId}`,
+          {
+            task,
+            output: finalAnswer,
+            status: finalStatus,
+            iterations: runContext.iteration,
+            timestamp: Date.now(),
+          },
+          [taskId, "outcome", finalStatus.toLowerCase()]
+        );
+        this.eventBus.emit("memory.updated", {
+          runId,
+          taskId,
+          data: {
+            tier: "long-term",
+            key: `task_outcome:${taskId}`,
+            action: "stored",
+          },
+        });
+      } catch {
+        // Non-blocking in best-effort
+      }
 
       if (this.verbose) {
         this.tracer.printTrace(runId);
@@ -694,7 +783,7 @@ export class Agent {
           timestamp: toolStart,
         });
       } catch {
-        // Storage errors don't halt execution
+        // Storage errors don't halt execution in best-effort mode
       }
 
       return result;
@@ -741,7 +830,7 @@ export class Agent {
           timestamp: toolStart,
         });
       } catch {
-        // Storage errors don't halt execution
+        // Storage errors don't halt execution in best-effort mode
       }
 
       return `Error executing ${toolCall.name}: ${errorMsg}`;
@@ -782,6 +871,11 @@ function createNoOpStore(): PersistenceStore {
     getRecentRuns: () => [],
     saveToolCall: () => {},
     getToolCallsByRun: () => [],
+    saveMemory: () => {},
+    getMemory: () => null,
+    getMemoriesByTier: () => [],
+    deleteMemory: () => {},
+    clearMemoryTier: () => {},
     saveState: () => {},
     getState: () => null,
     deleteState: () => {},
@@ -793,13 +887,19 @@ function createNoOpStore(): PersistenceStore {
 
 export { OpenAIProvider, MockModelProvider } from "@agentos/core";
 export type { OpenAIConfig, MockModelOptions, MockHandler } from "@agentos/core";
-export { filesystemTools, terminalTools, ToolRegistry } from "@agentos/tools";
+export {
+  filesystemTools,
+  terminalTools,
+  httpTools,
+  ToolRegistry,
+} from "@agentos/tools";
 export type { Tool } from "@agentos/tools";
 export { ConsoleApprovalHandler, AutoApprovalHandler } from "@agentos/permissions";
 export { EventBus } from "@agentos/events";
-export { MemoryManager } from "@agentos/memory";
+export { MemoryManager, SQLiteMemoryStore } from "@agentos/memory";
+export type { MemoryEntry } from "@agentos/memory";
 export { SQLiteStore } from "@agentos/storage";
-export type { ToolCallRecord } from "@agentos/storage";
+export type { ToolCallRecord, RunRecord, MemoryRecord } from "@agentos/storage";
 export { Tracer } from "@agentos/observability";
 export { ReActPlanner } from "@agentos/planner";
 export {

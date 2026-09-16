@@ -110,10 +110,16 @@ export class ReActPlanner implements Planner {
   }
 
   async decideNextAction(context: PlannerContext): Promise<PlannerDecision> {
-    // Build messages — inject system prompt at the start if not already there
+    // Build messages — ensure base system prompt is present
     const messages: ModelMessage[] = [...context.messages];
-    if (messages.length === 0 || messages[0].role !== "system") {
+    const systemIdx = messages.findIndex((m) => m.role === "system");
+    if (systemIdx === -1) {
       messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    } else if (!messages[systemIdx].content?.includes("You are an AI agent")) {
+      messages[systemIdx] = {
+        role: "system",
+        content: `${SYSTEM_PROMPT}\n\n${messages[systemIdx].content ?? ""}`.trim(),
+      };
     }
 
     try {

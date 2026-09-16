@@ -37,6 +37,13 @@ export interface PermissionPolicy {
     allowOrigins?: string[];
   };
 
+  http?: {
+    /** Origins allowed for HTTP requests (e.g. ["https://api.github.com"]). */
+    allowOrigins?: string[];
+    /** Origins explicitly blocked. Takes priority over allowOrigins. */
+    denyOrigins?: string[];
+  };
+
   approval?: {
     /** Require human approval for tools at or above this risk level. Default: HIGH */
     requireFor: RiskLevel;
@@ -96,6 +103,14 @@ export class PermissionEngine {
     // ── Browser checks ─────────────────────────────────────────────────
     if (normalizedName.startsWith("browser_") && this.policy.browser) {
       return this.checkBrowser(input);
+    }
+
+    // ── HTTP checks ────────────────────────────────────────────────────
+    if (
+      normalizedName.startsWith("http_") ||
+      normalizedName === "http_request"
+    ) {
+      return this.checkHttp(input);
     }
 
     // If trusted mode or no category restrictions apply
@@ -291,6 +306,64 @@ export class PermissionEngine {
         }
       } catch {
         return { allowed: false, reason: `Invalid URL: "${url}"` };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  private checkHttp(input: Record<string, unknown>): PermissionDecision {
+    const urlStr = String(input.url ?? "").trim();
+    if (!urlStr) {
+      return { allowed: false, reason: "URL cannot be empty" };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(urlStr);
+    } catch {
+      return { allowed: false, reason: `Invalid URL format: "${urlStr}"` };
+    }
+
+    // Strictly enforce http/https protocols (reject file:, gopher:, javascript:, data:, etc.)
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return {
+        allowed: false,
+        reason: `Forbidden protocol "${parsedUrl.protocol}". Only "http:" and "https:" are allowed.`,
+      };
+    }
+
+    const httpPolicy = this.policy.http;
+    if (!httpPolicy && !this.policy.trusted) {
+      return { allowed: true };
+    }
+    if (!httpPolicy) return { allowed: true };
+
+    const origin = parsedUrl.origin.toLowerCase();
+
+    // Check deny list first
+    if (httpPolicy.denyOrigins) {
+      const isDenied = httpPolicy.denyOrigins.some(
+        (o) => origin === o.toLowerCase().replace(/\/$/, "")
+      );
+      if (isDenied) {
+        return {
+          allowed: false,
+          reason: `Origin "${origin}" is explicitly blocked by HTTP policy`,
+        };
+      }
+    }
+
+    // Check allow list
+    if (httpPolicy.allowOrigins) {
+      const isAllowed = httpPolicy.allowOrigins.some(
+        (o) => origin === o.toLowerCase().replace(/\/$/, "")
+      );
+      if (!isAllowed) {
+        return {
+          allowed: false,
+          reason: `Origin "${origin}" is not in allowed origins: ${httpPolicy.allowOrigins.join(", ")}`,
+        };
       }
     }
 

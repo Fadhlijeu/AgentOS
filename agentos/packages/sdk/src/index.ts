@@ -65,11 +65,14 @@ export {
   ToolRegistry,
   filesystemTools,
   terminalTools,
+  httpTools,
+  httpRequestSchema,
 } from "@agentos/tools";
 
 export type {
   Tool,
   ToolContext,
+  HttpRequestInput,
 } from "@agentos/tools";
 
 // ─── Permissions & Human-in-the-Loop Approval ────────────────────────────────
@@ -106,6 +109,7 @@ export type {
 export {
   MemoryManager,
   InMemoryStore,
+  SQLiteMemoryStore,
 } from "@agentos/memory";
 
 export type {
@@ -120,6 +124,7 @@ export type {
   PersistenceStore,
   RunRecord,
   ToolCallRecord,
+  MemoryRecord,
 } from "@agentos/storage";
 
 // ─── Observability & Tracing ─────────────────────────────────────────────────

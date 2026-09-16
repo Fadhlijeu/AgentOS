@@ -22,6 +22,13 @@ export interface PersistenceStore {
   saveToolCall(toolCall: ToolCallRecord): void;
   getToolCallsByRun(runId: string): ToolCallRecord[];
 
+  // Memory
+  saveMemory(record: MemoryRecord): void;
+  getMemory(tier: string, key: string): MemoryRecord | null;
+  getMemoriesByTier(tier: string): MemoryRecord[];
+  deleteMemory(tier: string, key: string): void;
+  clearMemoryTier(tier: string): void;
+
   // State (key-value)
   saveState(key: string, value: unknown): void;
   getState(key: string): unknown | null;
@@ -29,6 +36,15 @@ export interface PersistenceStore {
 
   // Cleanup
   close(): void;
+}
+
+export interface MemoryRecord {
+  id: string;
+  tier: string;
+  key: string;
+  value: unknown;
+  tags: string[];
+  timestamp: number;
 }
 
 export interface ToolCallRecord {
@@ -124,6 +140,18 @@ export class SQLiteStore implements PersistenceStore {
 
       CREATE INDEX IF NOT EXISTS idx_tool_calls_run_id ON tool_calls(run_id);
       CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_name ON tool_calls(tool_name);
+
+      CREATE TABLE IF NOT EXISTS memory_entries (
+        id         TEXT PRIMARY KEY,
+        tier       TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        tags       TEXT NOT NULL DEFAULT '[]',
+        timestamp  INTEGER NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_tier_key ON memory_entries(tier, key);
+      CREATE INDEX IF NOT EXISTS idx_memory_tier ON memory_entries(tier);
 
       CREATE TABLE IF NOT EXISTS state (
         key      TEXT PRIMARY KEY,
@@ -230,6 +258,50 @@ export class SQLiteStore implements PersistenceStore {
     return rows.map(this.rowToToolCall);
   }
 
+  // ── Memory ─────────────────────────────────────────────────────────────
+
+  saveMemory(record: MemoryRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO memory_entries (id, tier, key, value, tags, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      record.id,
+      record.tier,
+      record.key,
+      JSON.stringify(record.value),
+      JSON.stringify(record.tags || []),
+      record.timestamp
+    );
+  }
+
+  getMemory(tier: string, key: string): MemoryRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM memory_entries WHERE tier = ? AND key = ?")
+      .get(tier, key) as any;
+    if (!row) return null;
+    return this.rowToMemory(row);
+  }
+
+  getMemoriesByTier(tier: string): MemoryRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM memory_entries WHERE tier = ? ORDER BY timestamp DESC"
+      )
+      .all(tier) as any[];
+    return rows.map(this.rowToMemory);
+  }
+
+  deleteMemory(tier: string, key: string): void {
+    this.db
+      .prepare("DELETE FROM memory_entries WHERE tier = ? AND key = ?")
+      .run(tier, key);
+  }
+
+  clearMemoryTier(tier: string): void {
+    this.db.prepare("DELETE FROM memory_entries WHERE tier = ?").run(tier);
+  }
+
   // ── State ──────────────────────────────────────────────────────────────
 
   saveState(key: string, value: unknown): void {
@@ -295,6 +367,17 @@ export class SQLiteStore implements PersistenceStore {
       result: row.result,
       durationMs: row.duration_ms,
       error: row.error,
+      timestamp: row.timestamp,
+    };
+  }
+
+  private rowToMemory(row: any): MemoryRecord {
+    return {
+      id: row.id,
+      tier: row.tier,
+      key: row.key,
+      value: JSON.parse(row.value),
+      tags: JSON.parse(row.tags || "[]"),
       timestamp: row.timestamp,
     };
   }

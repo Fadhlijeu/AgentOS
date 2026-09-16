@@ -88,6 +88,9 @@ importers:
       '@agentos/core':
         specifier: workspace:*
         version: link:../core
+      '@agentos/storage':
+        specifier: workspace:*
+        version: link:../storage
 
   agentos/packages/observability:
     dependencies:

@@ -3,6 +3,7 @@
 // Working memory is per-run (conversation state), long-term persists across runs.
 
 import type { ModelMessage } from "@agentos/core";
+import { SQLiteMemoryStore } from "./sqlite-store";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -13,6 +14,7 @@ export interface MemoryEntry {
   value: unknown;
   tier: MemoryTier;
   timestamp: number;
+  tags?: string[];
   expiresAt?: number;
 }
 
@@ -22,11 +24,21 @@ export interface MemoryEntry {
  */
 export interface MemoryStore {
   get(key: string): Promise<unknown | null>;
-  set(key: string, value: unknown, tier?: MemoryTier): Promise<void>;
+  set(
+    key: string,
+    value: unknown,
+    tier?: MemoryTier,
+    tags?: string[]
+  ): Promise<void>;
   has(key: string): Promise<boolean>;
-  delete(key: string): Promise<void>;
+  delete(key: string, tier?: MemoryTier): Promise<void>;
   getByTier(tier: MemoryTier): Promise<MemoryEntry[]>;
   clear(tier?: MemoryTier): Promise<void>;
+  search?(
+    query: string,
+    tier?: MemoryTier,
+    limit?: number
+  ): Promise<MemoryEntry[]>;
 }
 
 // ─── In-Memory Store ─────────────────────────────────────────────────────────
@@ -48,9 +60,16 @@ export class InMemoryStore implements MemoryStore {
   async set(
     key: string,
     value: unknown,
-    tier: MemoryTier = "working"
+    tier: MemoryTier = "working",
+    tags: string[] = []
   ): Promise<void> {
-    this.store.set(key, { key, value, tier, timestamp: Date.now() });
+    this.store.set(key, {
+      key,
+      value,
+      tier,
+      tags,
+      timestamp: Date.now(),
+    });
   }
 
   async has(key: string): Promise<boolean> {
@@ -75,14 +94,77 @@ export class InMemoryStore implements MemoryStore {
       this.store.clear();
     }
   }
+
+  async search(
+    query: string,
+    tier?: MemoryTier,
+    limit: number = 10
+  ): Promise<MemoryEntry[]> {
+    const stopWords = new Set([
+      "a",
+      "an",
+      "the",
+      "to",
+      "in",
+      "for",
+      "of",
+      "and",
+      "or",
+      "is",
+      "it",
+      "on",
+      "at",
+      "by",
+      "with",
+    ]);
+    const words = query
+      .toLowerCase()
+      .split(/[^a-zA-Z0-9_-]+/)
+      .filter((w) => w.length > 1 && !stopWords.has(w));
+
+    const scored: Array<{ entry: MemoryEntry; score: number }> = [];
+
+    for (const entry of this.store.values()) {
+      if (tier && entry.tier !== tier) continue;
+      if (entry.expiresAt && entry.expiresAt < Date.now()) continue;
+
+      let score = 0;
+      const keyLower = entry.key.toLowerCase();
+      const tagsLower = (entry.tags || []).map((t) => t.toLowerCase());
+      const valStr = (
+        typeof entry.value === "string"
+          ? entry.value
+          : JSON.stringify(entry.value)
+      ).toLowerCase();
+
+      // Full query match
+      if (keyLower.includes(query.toLowerCase())) score += 10;
+      if (tagsLower.includes(query.toLowerCase())) score += 8;
+      if (valStr.includes(query.toLowerCase())) score += 5;
+
+      // Word matches
+      for (const word of words) {
+        if (keyLower.includes(word)) score += 3;
+        if (tagsLower.some((t) => t.includes(word))) score += 3;
+        if (valStr.includes(word)) score += 1;
+      }
+
+      if (score > 0) {
+        scored.push({ entry, score });
+      }
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit).map((s) => s.entry);
+  }
 }
 
 // ─── Memory Manager ──────────────────────────────────────────────────────────
 
 /**
  * High-level memory manager used by the Agent.
- * Provides tiered access to working memory (per-run state)
- * and long-term memory (cross-run knowledge).
+ * Provides tiered access to working memory (per-run state),
+ * long-term memory (cross-run knowledge), and context retrieval.
  */
 export class MemoryManager {
   private store: MemoryStore;
@@ -91,16 +173,29 @@ export class MemoryManager {
     this.store = store ?? new InMemoryStore();
   }
 
+  private cleanKey(key: string): string {
+    return key.replace(/^(working|longterm|long-term|semantic):/, "");
+  }
+
   // ── Working Memory (per-run) ───────────────────────────────────────────
 
   /** Store a value in working memory. Cleared between runs. */
-  async setWorking(key: string, value: unknown): Promise<void> {
-    await this.store.set(`working:${key}`, value, "working");
+  async setWorking(
+    key: string,
+    value: unknown,
+    tags?: string[]
+  ): Promise<void> {
+    const clean = this.cleanKey(key);
+    await this.store.set(`working:${clean}`, value, "working", tags);
   }
 
   /** Get a value from working memory. */
   async getWorking(key: string): Promise<unknown | null> {
-    return this.store.get(`working:${key}`);
+    const clean = this.cleanKey(key);
+    return (
+      (await this.store.get(`working:${clean}`)) ??
+      (await this.store.get(clean))
+    );
   }
 
   /** Clear all working memory (called at the start of each run). */
@@ -124,13 +219,23 @@ export class MemoryManager {
   // ── Long-Term Memory (persists across runs) ────────────────────────────
 
   /** Store a fact, preference, or outcome in long-term memory. */
-  async setLongTerm(key: string, value: unknown): Promise<void> {
-    await this.store.set(`longterm:${key}`, value, "long-term");
+  async setLongTerm(
+    key: string,
+    value: unknown,
+    tags?: string[]
+  ): Promise<void> {
+    const clean = this.cleanKey(key);
+    await this.store.set(`longterm:${clean}`, value, "long-term", tags);
   }
 
   /** Get a value from long-term memory. */
   async getLongTerm(key: string): Promise<unknown | null> {
-    return this.store.get(`longterm:${key}`);
+    const clean = this.cleanKey(key);
+    return (
+      (await this.store.get(`longterm:${clean}`)) ??
+      (await this.store.get(`long-term:${clean}`)) ??
+      (await this.store.get(clean))
+    );
   }
 
   /** Get all long-term memory entries. */
@@ -138,21 +243,94 @@ export class MemoryManager {
     return this.store.getByTier("long-term");
   }
 
-  // ── Semantic Memory (v0.2 — placeholder) ───────────────────────────────
+  // ── Generic Remember & Retrieval ──────────────────────────────────────
 
-  /** Store a knowledge item with semantic embedding (v0.2). */
-  async setSemantic(_key: string, _value: unknown): Promise<void> {
-    // Will be implemented in v0.2 with embedding support
+  /** Store a memory in a specific tier with optional search tags. */
+  async remember(
+    tier: MemoryTier,
+    key: string,
+    value: unknown,
+    tags: string[] = []
+  ): Promise<void> {
+    const clean = this.cleanKey(key);
+    await this.store.set(clean, value, tier, tags);
   }
 
-  /** Retrieve semantically similar items (v0.2). */
-  async searchSemantic(_query: string, _limit?: number): Promise<unknown[]> {
-    // Will be implemented in v0.2
+  /**
+   * Retrieve memories relevant to a given task or query string.
+   * Searches across long-term and semantic tiers.
+   */
+  async retrieve(query: string, limit: number = 5): Promise<MemoryEntry[]> {
+    if (this.store.search) {
+      return this.store.search(query, undefined, limit);
+    }
+
+    // Fallback: search long-term memory entries
+    const entries = await this.getAllLongTerm();
+    const q = query.toLowerCase();
+    return entries
+      .filter((e) => {
+        if (e.key.toLowerCase().includes(q)) return true;
+        if (e.tags?.some((t) => t.toLowerCase().includes(q))) return true;
+        const valStr =
+          typeof e.value === "string" ? e.value : JSON.stringify(e.value);
+        return valStr.toLowerCase().includes(q);
+      })
+      .slice(0, limit);
+  }
+
+  /**
+   * Formats a list of memory entries into markdown text suitable for injecting
+   * into an agent's initial prompt context.
+   */
+  formatContextForPrompt(entries: MemoryEntry[]): string {
+    if (entries.length === 0) return "";
+
+    const lines = [
+      "## Context & Relevant Past Knowledge",
+      "The following relevant items were retrieved from memory:",
+    ];
+
+    for (const entry of entries) {
+      const cleanKey = entry.key.replace(/^(working|longterm|semantic):/, "");
+      const valStr =
+        typeof entry.value === "string"
+          ? entry.value
+          : JSON.stringify(entry.value);
+      lines.push(`- [${entry.tier}] ${cleanKey}: ${valStr}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  // ── Semantic Memory ───────────────────────────────────────────────────
+
+  /** Store a knowledge item with semantic tags. */
+  async setSemantic(
+    key: string,
+    value: unknown,
+    tags: string[] = []
+  ): Promise<void> {
+    await this.store.set(`semantic:${key}`, value, "semantic", tags);
+  }
+
+  /** Retrieve semantic memories. */
+  async searchSemantic(
+    query: string,
+    limit: number = 5
+  ): Promise<MemoryEntry[]> {
+    if (this.store.search) {
+      return this.store.search(query, "semantic", limit);
+    }
     return [];
   }
 
-  /** Get the underlying store (for advanced usage). */
+  /** Get the underlying store. */
   getStore(): MemoryStore {
     return this.store;
   }
 }
+
+// ─── Re-exports ──────────────────────────────────────────────────────────────
+
+export { SQLiteMemoryStore } from "./sqlite-store";
