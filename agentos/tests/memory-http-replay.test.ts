@@ -79,7 +79,7 @@ async function main() {
       const longTermEntries = await store2.getByTier("long-term");
       assert(longTermEntries.length === 1, "Should have 1 long-term entry");
       assert(
-        longTermEntries[0].tags?.includes("identity"),
+        Boolean(longTermEntries[0].tags?.includes("identity")),
         "Tags must be preserved"
       );
 
@@ -146,7 +146,7 @@ async function main() {
       });
 
       const memoryUpdatedEvents: AgentEvent[] = [];
-      agent.getEventBus().on("memory.updated", (e) => memoryUpdatedEvents.push(e));
+      agent.getEventBus().on("memory.updated", (e: any) => memoryUpdatedEvents.push(e));
 
       const res = await agent.run("Calculate important metric");
 
@@ -284,11 +284,11 @@ async function main() {
 
       assert(replayData.events.length >= 4, "Timeline events must be preserved");
       assert(
-        replayData.events.some((e) => e.type === "agent.started"),
+        replayData.events.some((e: any) => e.type === "agent.started"),
         "agent.started event must be in replay timeline"
       );
       assert(
-        replayData.events.some((e) => e.type === "memory.updated"),
+        replayData.events.some((e: any) => e.type === "memory.updated"),
         "memory.updated event must be in replay timeline"
       );
 
@@ -315,6 +315,7 @@ async function main() {
   if (failed > 0) {
     process.exit(1);
   }
+  process.exit(0);
 }
 
 main().catch((err) => {

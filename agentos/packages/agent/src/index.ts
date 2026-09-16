@@ -908,6 +908,7 @@ export {
 } from "@agentos/tools";
 export type { Tool } from "@agentos/tools";
 export { ConsoleApprovalHandler, AutoApprovalHandler } from "@agentos/permissions";
+export type { ApprovalHandler, PermissionPolicy } from "@agentos/permissions";
 export { EventBus } from "@agentos/events";
 export { MemoryManager, SQLiteMemoryStore } from "@agentos/memory";
 export type { MemoryEntry } from "@agentos/memory";

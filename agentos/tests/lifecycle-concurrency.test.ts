@@ -186,8 +186,8 @@ async function main() {
       const pausedEvents: AgentEvent[] = [];
       const resumedEvents: AgentEvent[] = [];
 
-      agent.getEventBus().on("agent.paused", (e) => pausedEvents.push(e));
-      agent.getEventBus().on("agent.resumed", (e) => resumedEvents.push(e));
+      agent.getEventBus().on("agent.paused", (e: any) => pausedEvents.push(e));
+      agent.getEventBus().on("agent.resumed", (e: any) => resumedEvents.push(e));
 
       // Emulate multiple tool calls so we can pause between them
       mock.addToolCall("filesystem_read", { path: path.join(tempDir, "sample.txt") });
@@ -290,6 +290,7 @@ async function main() {
   if (failed > 0) {
     process.exit(1);
   }
+  process.exit(0);
 }
 
 main().catch((err) => {

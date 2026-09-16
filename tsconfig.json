@@ -1,0 +1,38 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@agentos/core": ["agentos/packages/core/src/index.ts"],
+      "@agentos/core/*": ["agentos/packages/core/src/*"],
+      "@agentos/events": ["agentos/packages/events/src/index.ts"],
+      "@agentos/events/*": ["agentos/packages/events/src/*"],
+      "@agentos/tools": ["agentos/packages/tools/src/index.ts"],
+      "@agentos/tools/*": ["agentos/packages/tools/src/*"],
+      "@agentos/permissions": ["agentos/packages/permissions/src/index.ts"],
+      "@agentos/permissions/*": ["agentos/packages/permissions/src/*"],
+      "@agentos/planner": ["agentos/packages/planner/src/index.ts"],
+      "@agentos/planner/*": ["agentos/packages/planner/src/*"],
+      "@agentos/memory": ["agentos/packages/memory/src/index.ts"],
+      "@agentos/memory/*": ["agentos/packages/memory/src/*"],
+      "@agentos/storage": ["agentos/packages/storage/src/index.ts"],
+      "@agentos/storage/*": ["agentos/packages/storage/src/*"],
+      "@agentos/observability": ["agentos/packages/observability/src/index.ts"],
+      "@agentos/observability/*": ["agentos/packages/observability/src/*"],
+      "@agentos/runtime": ["agentos/packages/runtime/src/index.ts"],
+      "@agentos/runtime/*": ["agentos/packages/runtime/src/*"],
+      "@agentos/agent": ["agentos/packages/agent/src/index.ts"],
+      "@agentos/agent/*": ["agentos/packages/agent/src/*"],
+      "@agentos/adapters": ["agentos/packages/adapters/src/index.ts"],
+      "@agentos/adapters/*": ["agentos/packages/adapters/src/*"],
+      "@agentos/sdk": ["agentos/packages/sdk/src/index.ts"],
+      "@agentos/sdk/*": ["agentos/packages/sdk/src/*"]
+    }
+  },
+  "include": [
+    "agentos/packages/*/src/**/*",
+    "agentos/apps/*/src/**/*",
+    "agentos/tests/**/*",
+    "agentos/examples/**/*"
+  ]
+}

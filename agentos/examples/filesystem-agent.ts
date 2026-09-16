@@ -129,7 +129,7 @@ async function main() {
     console.log(`  [Check 1] Lifecycle Start Events:  ${hasStart ? "✅ PASS" : "❌ FAIL"}`);
     console.log(`  [Check 2] Tool Execution Events:   ${hasToolCalls ? "✅ PASS" : "❌ FAIL"}`);
     console.log(`  [Check 3] Task Completion Event:   ${hasTaskEnd ? "✅ PASS" : "❌ FAIL"}`);
-    console.log(`  [Check 4] Output Received:         ${result.output.length > 0 ? "✅ PASS" : "❌ FAIL"}`);
+    console.log(`  [Check 4] Output Received:         ${(result.output?.length ?? 0) > 0 ? "✅ PASS" : "❌ FAIL"}`);
 
     console.log("\n" + "─".repeat(60));
     console.log("Final Agent Output:\n");

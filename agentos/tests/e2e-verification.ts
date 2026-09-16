@@ -84,7 +84,7 @@ async function runAllTests() {
       assert(res.success, "Agent run should succeed");
       assert(res.iterations === 1, "Should complete in 1 iteration");
       assert(res.output?.includes("Hello from AgentOS!") ?? false, "Output should contain greeting");
-      assert(res.events.some((e) => e.type === "tool.completed"), "Should emit tool.completed");
+      assert(res.events.some((e: any) => e.type === "tool.completed"), "Should emit tool.completed");
     });
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ async function runAllTests() {
       if (fs.existsSync(secretFile)) fs.unlinkSync(secretFile);
 
       // Verify that tool.failed was emitted due to permission denial
-      const failedEvent = res.events.find((e) => e.type === "tool.failed");
+      const failedEvent = res.events.find((e: any) => e.type === "tool.failed");
       assert(Boolean(failedEvent), "tool.failed event should be emitted");
       assert(
         JSON.stringify(failedEvent?.data).includes("Permission denied"),
@@ -154,7 +154,7 @@ async function runAllTests() {
       const res = await agent.run("Run command");
       agent.dispose();
 
-      const failedEvent = res.events.find((e) => e.type === "tool.failed");
+      const failedEvent = res.events.find((e: any) => e.type === "tool.failed");
       assert(Boolean(failedEvent), "tool.failed event should be emitted for denied command");
       assert(
         JSON.stringify(failedEvent?.data).includes("Permission denied"),
@@ -177,7 +177,7 @@ async function runAllTests() {
       // Custom handler that denies all approval requests
       const rejectingHandler: ApprovalHandler = {
         async requestApproval() {
-          return { approved: false, reason: "User rejected delete operation" };
+          return "DENIED";
         },
       };
 
@@ -200,7 +200,7 @@ async function runAllTests() {
       // Target file should STILL exist because user rejected
       assert(fs.existsSync(targetFile), "File must NOT be deleted when approval is denied");
 
-      const failedEvent = res.events.find((e) => e.type === "tool.failed");
+      const failedEvent = res.events.find((e: any) => e.type === "tool.failed");
       assert(Boolean(failedEvent), "tool.failed event must be emitted on rejection");
       assert(
         JSON.stringify(failedEvent?.data).includes("denied by user"),
@@ -236,11 +236,11 @@ async function runAllTests() {
       const savedEvents = store.getEventsByRun(res.runId);
       assert(savedEvents.length > 0, "Events should be persisted in DB");
       assert(
-        savedEvents.some((e) => e.type === "agent.started"),
+        savedEvents.some((e: any) => e.type === "agent.started"),
         "agent.started should be persisted"
       );
       assert(
-        savedEvents.some((e) => e.type === "task.completed"),
+        savedEvents.some((e: any) => e.type === "task.completed"),
         "task.completed should be persisted"
       );
 
@@ -322,6 +322,7 @@ async function runAllTests() {
   if (failed > 0) {
     process.exit(1);
   }
+  process.exit(0);
 }
 
 runAllTests().catch((err) => {
