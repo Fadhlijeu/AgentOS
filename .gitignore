@@ -29,6 +29,11 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Archives
+*.zip
+*.tar.gz
+*.tgz
+
 # IDE & OS
 .vscode/
 .idea/
