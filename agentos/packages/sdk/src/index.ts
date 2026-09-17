@@ -75,6 +75,12 @@ export {
   InMemoryWorkspace,
   VirtualBrowserSession,
   VirtualBrowserProvider,
+  PlaywrightBrowserSession,
+  PlaywrightBrowserProvider,
+  OpenInterpreterAdapter,
+  createInterpreterTool,
+  OpenHandsWorkspaceAdapter,
+  OpenHandsEventMapper,
 } from "@agentos/adapters";
 
 // ─── Tool System ─────────────────────────────────────────────────────────────

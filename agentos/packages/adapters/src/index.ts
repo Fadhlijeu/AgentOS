@@ -17,6 +17,9 @@ export type {
 
 export * from "./workspace";
 export * from "./browser";
+export * from "./playwright-browser";
+export * from "./open-interpreter";
+export * from "./openhands";
 
 // ─── Code Interpreter Abstraction ────────────────────────────────────────────
 
@@ -31,7 +34,7 @@ export interface CodeInterpreterAdapter {
   execute(
     language: string,
     code: string,
-    options?: { timeoutMs?: number }
+    options?: { timeoutMs?: number; signal?: AbortSignal; cwd?: string }
   ): Promise<ExecutionResult>;
 }
 

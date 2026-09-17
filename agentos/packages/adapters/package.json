@@ -12,6 +12,7 @@
   "dependencies": {
     "@agentos/core": "workspace:*",
     "@agentos/permissions": "workspace:*",
-    "@agentos/tools": "workspace:*"
+    "@agentos/tools": "workspace:*",
+    "playwright-core": "^1.63.0"
   }
 }

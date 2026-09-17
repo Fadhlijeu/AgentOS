@@ -311,10 +311,14 @@ export class Agent {
   }
 
   /**
-   * Reconstruct and replay the full execution history of a specific runId,
-   * returning the recorded run, timeline events, and tool calls.
+   * Reconstruct the execution timeline of a specific runId from durable storage,
+   * returning the recorded run record, ordered event stream, and tool call logs.
+   *
+   * NOTE: This is an *audit timeline & trace reconstruction*, reconstructing
+   * what occurred during execution. For live simulation or deterministic re-execution,
+   * use ReActPlanner in mock mode.
    */
-  async replay(runId: string): Promise<{
+  async reconstructTimeline(runId: string): Promise<{
     run: RunRecord | null;
     events: AgentEvent[];
     toolCalls: ToolCallRecord[];
@@ -327,6 +331,17 @@ export class Agent {
       events,
       toolCalls,
     };
+  }
+
+  /**
+   * Backwards-compatible alias for reconstructTimeline(runId).
+   */
+  async replay(runId: string): Promise<{
+    run: RunRecord | null;
+    events: AgentEvent[];
+    toolCalls: ToolCallRecord[];
+  }> {
+    return this.reconstructTimeline(runId);
   }
 
   /** Clean up resources. Call when done using the agent. */
@@ -1004,6 +1019,14 @@ export class AgentRuntime {
   async stopAll(): Promise<void> {
     const runs = this.agent.getActiveRuns();
     await Promise.all(runs.map((r) => r.cancel()));
+  }
+
+  async reconstructTimeline(runId: string): Promise<{
+    run: RunRecord | null;
+    events: AgentEvent[];
+    toolCalls: ToolCallRecord[];
+  }> {
+    return this.agent.reconstructTimeline(runId);
   }
 
   async replay(runId: string): Promise<{
