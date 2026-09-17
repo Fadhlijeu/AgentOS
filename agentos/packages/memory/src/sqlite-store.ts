@@ -69,6 +69,11 @@ export class SQLiteMemoryStore implements MemoryStore {
     this.store.deleteMemory(tier, rawKey);
   }
 
+  async deleteByPrefix(prefix: string, tier: MemoryTier = "working"): Promise<void> {
+    const rawPrefix = this.cleanKey(prefix);
+    this.store.deleteMemoryByPrefix(tier, rawPrefix);
+  }
+
   async getByTier(tier: MemoryTier): Promise<MemoryEntry[]> {
     const records = this.store.getMemoriesByTier(tier);
     return records.map((r) => ({

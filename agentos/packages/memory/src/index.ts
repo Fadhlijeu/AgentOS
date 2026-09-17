@@ -81,6 +81,14 @@ export class InMemoryStore implements MemoryStore {
     this.store.delete(key);
   }
 
+  async deleteByPrefix(prefix: string): Promise<void> {
+    for (const key of this.store.keys()) {
+      if (key.startsWith(prefix)) {
+        this.store.delete(key);
+      }
+    }
+  }
+
   async getByTier(tier: MemoryTier): Promise<MemoryEntry[]> {
     return Array.from(this.store.values()).filter((e) => e.tier === tier);
   }
@@ -179,40 +187,54 @@ export class MemoryManager {
 
   // ── Working Memory (per-run) ───────────────────────────────────────────
 
-  /** Store a value in working memory. Cleared between runs. */
+  /** Store a value in working memory. Cleared between runs or scoped to runId. */
   async setWorking(
     key: string,
     value: unknown,
-    tags?: string[]
+    tags?: string[],
+    runId?: string
   ): Promise<void> {
     const clean = this.cleanKey(key);
-    await this.store.set(`working:${clean}`, value, "working", tags);
+    const keyPath = runId ? `working:${runId}:${clean}` : `working:${clean}`;
+    await this.store.set(keyPath, value, "working", tags);
   }
 
-  /** Get a value from working memory. */
-  async getWorking(key: string): Promise<unknown | null> {
+  /** Get a value from working memory (checks run-scoped key first if runId provided). */
+  async getWorking(key: string, runId?: string): Promise<unknown | null> {
     const clean = this.cleanKey(key);
+    if (runId) {
+      const runScoped = await this.store.get(`working:${runId}:${clean}`);
+      if (runScoped !== null) return runScoped;
+    }
     return (
       (await this.store.get(`working:${clean}`)) ??
       (await this.store.get(clean))
     );
   }
 
-  /** Clear all working memory (called at the start of each run). */
-  async clearWorking(): Promise<void> {
-    await this.store.clear("working");
+  /** Clear working memory for a specific run, or all un-scoped working memory. */
+  async clearWorking(runId?: string): Promise<void> {
+    if (runId) {
+      if ("deleteByPrefix" in this.store && typeof (this.store as any).deleteByPrefix === "function") {
+        await (this.store as any).deleteByPrefix(`working:${runId}:`);
+      } else {
+        await this.store.delete(`working:${runId}:conversation`, "working");
+      }
+    } else {
+      await this.store.clear("working");
+    }
   }
 
   // ── Conversation History (working memory shortcut) ─────────────────────
 
   /** Store the current conversation messages for the active run. */
-  async setConversation(messages: ModelMessage[]): Promise<void> {
-    await this.setWorking("conversation", messages);
+  async setConversation(messages: ModelMessage[], runId?: string): Promise<void> {
+    await this.setWorking("conversation", messages, undefined, runId);
   }
 
   /** Get the current conversation messages. */
-  async getConversation(): Promise<ModelMessage[]> {
-    const val = await this.getWorking("conversation");
+  async getConversation(runId?: string): Promise<ModelMessage[]> {
+    const val = await this.getWorking("conversation", runId);
     return (val as ModelMessage[]) ?? [];
   }
 

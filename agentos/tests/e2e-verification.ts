@@ -73,6 +73,11 @@ async function runAllTests() {
       const agent = new Agent({
         model: mock,
         tools: filesystemTools(),
+        permissions: {
+          filesystem: {
+            read: [tempDir],
+          },
+        },
         approvalHandler: new AutoApprovalHandler(),
         verbose: false,
         dbPath: ":memory:",
@@ -185,6 +190,9 @@ async function runAllTests() {
         model: mock,
         tools: filesystemTools(),
         permissions: {
+          filesystem: {
+            write: [tempDir],
+          },
           approval: {
             requireFor: "HIGH",
           },

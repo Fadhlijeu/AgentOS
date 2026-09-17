@@ -11,6 +11,7 @@ This document provides complete, reproducible provenance for all third-party ope
 - **License**: MIT License ([software-agent-sdk/LICENSE](file:///D:/PROJECT/AgentOS/software-agent-sdk/LICENSE))
 - **Exact Commit SHA**: `22c85eb0e0db8f4386380d095e9fe6933af2e65f`
 - **Local Path**: `D:\PROJECT\AgentOS\software-agent-sdk`
+- **Status**: Protocol-compatible adapter (implements OpenHands workspace sandbox semantics and action/observation event translation; does not embed python agent-server)
 - **Reused Subsystems**:
   - Workspace abstraction patterns (`openhands-workspace`)
   - Event hierarchy & Action/Observation paradigm (`openhands-sdk`)
@@ -36,6 +37,7 @@ This document provides complete, reproducible provenance for all third-party ope
 - **License**: MIT License ([browser-use/LICENSE](file:///D:/PROJECT/AgentOS/browser-use/LICENSE))
 - **Exact Commit SHA**: `d8110c5ff87ccba887aaa726cdb780f2f84bef8d`
 - **Local Path**: `D:\PROJECT\AgentOS\browser-use`
+- **Status**: AgentOS-native Playwright implementation (inspired by Browser Use perception-action loop schemas and DOM extraction; does not bundle Python browser-use runtime)
 - **Reused Subsystems**:
   - Browser automation perception-action loop design
   - DOM tree parsing and interactive element filtering (`browser_use/dom`)
@@ -59,6 +61,7 @@ This document provides complete, reproducible provenance for all third-party ope
 - **License**: MIT License ([open-browser-use/LICENSE](file:///D:/PROJECT/AgentOS/open-browser-use/LICENSE))
 - **Exact Commit SHA**: `7765002ac88040aedc781be89afe68475a9d6c88`
 - **Local Path**: `D:\PROJECT\AgentOS\open-browser-use`
+- **Status**: Architectural & launch pattern reference (adopts stealth launch arguments and DOM extraction conventions; existing user profile & MCP broker planned for milestone 2)
 - **Reused Subsystems**:
   - Browser-control core types & DOM locator conventions (`packages/browser-control-core`)
   - Snapshot text formatting (`packages/sdk/src/snapshot-text.ts`)
@@ -81,6 +84,7 @@ This document provides complete, reproducible provenance for all third-party ope
 - **License**: Apache License 2.0 ([openinterpreter/LICENSE](file:///D:/PROJECT/AgentOS/openinterpreter/LICENSE))
 - **Exact Commit SHA**: `5db50b2e93224dda720462f02fc2858cbd112eb5`
 - **Local Path**: `D:\PROJECT\AgentOS\openinterpreter`
+- **Status**: AgentOS-native subprocess execution (inspired by Open Interpreter multi-language execution and output streaming; hardened with AST command parsing and permission checks)
 - **Reused Subsystems**:
   - Multi-language code execution patterns (Python, Shell, JavaScript)
   - Subprocess execution isolation and output streaming

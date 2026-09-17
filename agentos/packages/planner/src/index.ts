@@ -35,16 +35,22 @@ export type PlannerDecision =
       toolCalls: ModelToolCall[];
       /** Optional reasoning text from the model. */
       reasoning: string | null;
+      /** Token usage for this planner call. */
+      usage?: PlannerUsage;
     }
   | {
       type: "final_answer";
       /** The model's final response to the user's task. */
       answer: string;
+      /** Token usage for this planner call. */
+      usage?: PlannerUsage;
     }
   | {
       type: "error";
       /** What went wrong. */
       error: string;
+      /** Token usage for this planner call (if available). */
+      usage?: PlannerUsage;
     };
 
 /** Token usage for the last planner call. */
@@ -59,7 +65,11 @@ export interface PlannerUsage {
 export interface Planner {
   /** Given the current context, decide what to do next. */
   decideNextAction(context: PlannerContext): Promise<PlannerDecision>;
-  /** Get the token usage from the last call. */
+  /**
+   * Get the token usage from the last call.
+   * @deprecated Use the `usage` field from the PlannerDecision instead.
+   * This global state is NOT safe for concurrent runs.
+   */
   getLastUsage(): PlannerUsage;
 }
 
@@ -131,11 +141,12 @@ export class ReActPlanner implements Planner {
       });
 
       // Track token usage
-      this.lastUsage = {
+      const usage: PlannerUsage = {
         promptTokens: response.usage.promptTokens,
         completionTokens: response.usage.completionTokens,
         totalTokens: response.usage.totalTokens,
       };
+      this.lastUsage = usage;
 
       // If the model returned tool calls → return them for execution
       if (response.toolCalls.length > 0) {
@@ -143,6 +154,7 @@ export class ReActPlanner implements Planner {
           type: "tool_calls",
           toolCalls: response.toolCalls,
           reasoning: response.content,
+          usage,
         };
       }
 
@@ -151,6 +163,7 @@ export class ReActPlanner implements Planner {
         return {
           type: "final_answer",
           answer: response.content,
+          usage,
         };
       }
 

@@ -39,6 +39,7 @@ import {
   ApprovalManager,
   AutoApprovalHandler,
   ConsoleApprovalHandler,
+  redactSecrets,
   type PermissionPolicy,
   type ApprovalHandler,
 } from "@agentos/permissions";
@@ -205,16 +206,33 @@ export class Agent {
    * Start a task asynchronously and return an AgentRun handle immediately.
    * This provides an isolated RunContext with its own lifecycle, cancellation signal,
    * state machine, and result promise. Multiple runs can execute concurrently.
+   *
+   * @param task - The task description string
+   * @param options - Optional: AbortSignal and WorkspaceAdapter for external control/scoping
    */
-  start(task: string): AgentRun {
+  start(
+    task: string,
+    options?: { signal?: AbortSignal; workspace?: WorkspaceAdapter }
+  ): AgentRun {
     const runId = generateId("run");
     const taskId = generateId("task");
+    const workspace = options?.workspace ?? this.workspace;
     const runContext = new RunContext({
       runId,
       taskId,
       task,
       eventBus: this.eventBus,
+      workspace,
     });
+
+    // Wire external signal into run cancellation
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        runContext.cancel();
+      } else {
+        options.signal.addEventListener("abort", () => runContext.cancel(), { once: true });
+      }
+    }
 
     if (this.pendingStatus === "CANCELLED") {
       runContext.cancel();
@@ -236,8 +254,11 @@ export class Agent {
    * Run a task and await completion. Starts the ReAct loop and returns when the
    * agent produces a final answer, hits the iteration limit, or is cancelled/errors.
    */
-  async run(task: string): Promise<AgentResult> {
-    const run = this.start(task);
+  async run(
+    task: string,
+    options?: { signal?: AbortSignal; workspace?: WorkspaceAdapter }
+  ): Promise<AgentResult> {
+    const run = this.start(task, options);
     return run.result;
   }
 
@@ -344,8 +365,33 @@ export class Agent {
     return this.reconstructTimeline(runId);
   }
 
-  /** Clean up resources. Call when done using the agent. */
-  dispose(): void {
+  /**
+   * Clean up resources. Cancels all active runs, waits for them to settle,
+   * then closes storage/eventBus/tracer.
+   *
+   * This is async to allow graceful shutdown — runs have a short grace period
+   * to complete cancellation before resources are destroyed.
+   */
+  async dispose(): Promise<void> {
+    // Cancel all active runs first to prevent orphaned processes
+    const activeRunList = Array.from(this.activeRuns.values());
+    for (const run of activeRunList) {
+      try {
+        await run.cancel();
+      } catch {
+        // Ignore cancellation errors during shutdown
+      }
+    }
+
+    // Give runs a short grace period to settle (max 2 seconds)
+    if (activeRunList.length > 0) {
+      await Promise.race([
+        Promise.allSettled(activeRunList.map((r) => r.result)),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    }
+
+    this.activeRuns.clear();
     this.eventBus.dispose();
     this.tracer.dispose();
     this.store.close();
@@ -391,8 +437,8 @@ export class Agent {
 
       runContext.start();
 
-      // Clear working memory for this task
-      await this.memory.clearWorking();
+      // Clear working memory for this task (run-scoped)
+      await this.memory.clearWorking(runId);
 
       // 1. Context Retrieval from Memory:
       // Query durable long-term and semantic memory for relevant past knowledge
@@ -461,8 +507,8 @@ export class Agent {
           break;
         }
 
-        // Track token usage directly from planner
-        const usage = this.planner.getLastUsage();
+        // Track token usage from the decision (per-run safe, no global state race)
+        const usage = decision.usage;
         if (usage) {
           runContext.usage.promptTokens += usage.promptTokens;
           runContext.usage.completionTokens += usage.completionTokens;
@@ -670,6 +716,10 @@ export class Agent {
       };
 
       runContext.fail(err, result);
+    } finally {
+      // P1-8: Clean up activeRuns map to prevent memory leaks.
+      // Once a run reaches a terminal state, there's no reason to keep it in the map.
+      this.activeRuns.delete(runContext.runId);
     }
   }
 
@@ -697,10 +747,12 @@ export class Agent {
       return `Error: ${msg}`;
     }
 
+    // P0-3: Redact secrets from event data — original arguments are used for execution,
+    // but events/SQLite/traces only see sanitized copies.
     this.eventBus.emit("tool.requested", {
       runId,
       taskId,
-      data: { toolName: toolCall.name, arguments: toolCall.arguments },
+      data: { toolName: toolCall.name, arguments: redactSecrets(toolCall.arguments as Record<string, unknown>) },
     });
 
     // ── Input Schema Validation ─────────────────────────────────────────
@@ -742,7 +794,8 @@ export class Agent {
         tool.riskLevel,
         toolCall.arguments as Record<string, unknown>,
         runId,
-        taskId
+        taskId,
+        signal
       );
       if (!approved) {
         const msg = `Action denied by user: ${toolCall.name}`;
@@ -903,6 +956,7 @@ function createNoOpStore(): PersistenceStore {
     getMemory: () => null,
     getMemoriesByTier: () => [],
     deleteMemory: () => {},
+    deleteMemoryByPrefix: () => {},
     clearMemoryTier: () => {},
     saveState: () => {},
     getState: () => null,
@@ -922,8 +976,17 @@ export {
   ToolRegistry,
 } from "@agentos/tools";
 export type { Tool } from "@agentos/tools";
-export { ConsoleApprovalHandler, AutoApprovalHandler } from "@agentos/permissions";
-export type { ApprovalHandler, PermissionPolicy } from "@agentos/permissions";
+export {
+  ConsoleApprovalHandler,
+  AutoApprovalHandler,
+  PermissionEngine,
+  redactSecrets,
+} from "@agentos/permissions";
+export type {
+  ApprovalHandler,
+  PermissionPolicy,
+  ApprovalRequest,
+} from "@agentos/permissions";
 export { EventBus } from "@agentos/events";
 export { MemoryManager, SQLiteMemoryStore } from "@agentos/memory";
 export type { MemoryEntry } from "@agentos/memory";
@@ -987,13 +1050,18 @@ export class AgentRuntime {
   start(taskOrOptions: string | TaskOptions): AgentRun {
     const task =
       typeof taskOrOptions === "string" ? taskOrOptions : taskOrOptions.task;
-    return this.agent.start(task);
+    const signal =
+      typeof taskOrOptions === "string" ? undefined : taskOrOptions.signal;
+    const workspace =
+      typeof taskOrOptions === "string"
+        ? this.workspace
+        : (taskOrOptions.workspace ?? this.workspace);
+    return this.agent.start(task, { signal, workspace });
   }
 
   async run(taskOrOptions: string | TaskOptions): Promise<AgentResult> {
-    const task =
-      typeof taskOrOptions === "string" ? taskOrOptions : taskOrOptions.task;
-    return this.agent.run(task);
+    const run = this.start(taskOrOptions);
+    return run.result;
   }
 
   async pause(): Promise<void> {
@@ -1037,7 +1105,7 @@ export class AgentRuntime {
     return this.agent.replay(runId);
   }
 
-  dispose(): void {
-    this.agent.dispose();
+  async dispose(): Promise<void> {
+    await this.agent.dispose();
   }
 }

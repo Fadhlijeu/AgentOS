@@ -153,6 +153,7 @@ async function main(): Promise<void> {
         permissions: {
           browser: {
             allowOrigins: [baseUrl],
+            allowPrivateNetworks: true,
           },
           filesystem: {
             write: [workspaceDir],

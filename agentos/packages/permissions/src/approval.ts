@@ -21,7 +21,7 @@ export interface ApprovalRequest {
  * Implementations can be console-based, UI-based, API-based, etc.
  */
 export interface ApprovalHandler {
-  requestApproval(request: ApprovalRequest): Promise<ApprovalStatus>;
+  requestApproval(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalStatus>;
 }
 
 // ─── Approval Manager ────────────────────────────────────────────────────────
@@ -56,7 +56,8 @@ export class ApprovalManager {
     riskLevel: RiskLevel,
     input: Record<string, unknown>,
     runId: string,
-    taskId: string
+    taskId: string,
+    signal?: AbortSignal
   ): Promise<boolean> {
     const requestId = `approval_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const request: ApprovalRequest = {
@@ -82,11 +83,29 @@ export class ApprovalManager {
     });
 
     try {
-      // Race between handler and timeout
-      const status = await Promise.race([
-        this.handler.requestApproval(request),
+      // Race between handler, timeout, and optional abort signal
+      const raceEntries: Promise<ApprovalStatus>[] = [
+        this.handler.requestApproval(request, signal),
         this.createTimeout(),
-      ]);
+      ];
+
+      // If an AbortSignal is provided, also race against it
+      if (signal) {
+        raceEntries.push(
+          new Promise<ApprovalStatus>((_, reject) => {
+            if (signal.aborted) {
+              reject(new Error("Approval cancelled"));
+            } else {
+              signal.addEventListener("abort", () =>
+                reject(new Error("Approval cancelled")),
+                { once: true }
+              );
+            }
+          })
+        );
+      }
+
+      const status = await Promise.race(raceEntries);
 
       this.pending.delete(requestId);
 
@@ -131,11 +150,23 @@ export class ApprovalManager {
  * Shows the tool name, risk level, and arguments, then asks [y/n].
  */
 export class ConsoleApprovalHandler implements ApprovalHandler {
-  async requestApproval(request: ApprovalRequest): Promise<ApprovalStatus> {
+  async requestApproval(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalStatus> {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stderr, // use stderr so stdout stays clean for piping
     });
+
+    // Wire abort signal to close readline immediately
+    const onAbort = () => {
+      rl.close();
+    };
+    if (signal) {
+      if (signal.aborted) {
+        rl.close();
+        return "DENIED";
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
 
     return new Promise<ApprovalStatus>((resolve) => {
       console.error("\n┌─────────────────────────────────────────────────────");
@@ -146,9 +177,16 @@ export class ConsoleApprovalHandler implements ApprovalHandler {
       console.error("└─────────────────────────────────────────────────────");
 
       rl.question("  Approve? [y/N]: ", (answer) => {
+        if (signal) signal.removeEventListener("abort", onAbort);
         rl.close();
         const approved = answer.trim().toLowerCase() === "y";
         resolve(approved ? "GRANTED" : "DENIED");
+      });
+
+      // Handle readline closing due to abort
+      rl.on("close", () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve("DENIED");
       });
     });
   }
@@ -158,7 +196,7 @@ export class ConsoleApprovalHandler implements ApprovalHandler {
  * Auto-approves everything. Use for testing or trusted environments only.
  */
 export class AutoApprovalHandler implements ApprovalHandler {
-  async requestApproval(_request: ApprovalRequest): Promise<ApprovalStatus> {
+  async requestApproval(_request: ApprovalRequest, _signal?: AbortSignal): Promise<ApprovalStatus> {
     return "GRANTED";
   }
 }

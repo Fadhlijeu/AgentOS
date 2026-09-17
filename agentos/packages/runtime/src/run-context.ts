@@ -2,7 +2,12 @@
 // Isolated runtime context per task execution. Decouples state from the Agent
 // instance so multiple tasks can run concurrently without state collisions.
 
-import type { AgentStatus, AgentResult, ModelMessage } from "@agentos/core";
+import type {
+  AgentStatus,
+  AgentResult,
+  ModelMessage,
+  WorkspaceAdapter,
+} from "@agentos/core";
 import { EventBus } from "@agentos/events";
 import { RunStateMachine } from "./state-machine";
 
@@ -13,6 +18,7 @@ export interface AgentRun {
   readonly status: AgentStatus;
   readonly signal: AbortSignal;
   readonly result: Promise<AgentResult>;
+  readonly workspace?: WorkspaceAdapter;
 
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -24,6 +30,7 @@ export interface RunContextOptions {
   taskId: string;
   task: string;
   eventBus: EventBus;
+  workspace?: WorkspaceAdapter;
 }
 
 export class RunContext implements AgentRun {
@@ -31,6 +38,7 @@ export class RunContext implements AgentRun {
   readonly taskId: string;
   readonly task: string;
   readonly startTime: number;
+  readonly workspace?: WorkspaceAdapter;
 
   private readonly stateMachine: RunStateMachine;
   private readonly abortController: AbortController;
@@ -50,6 +58,7 @@ export class RunContext implements AgentRun {
     this.taskId = options.taskId;
     this.task = options.task;
     this.eventBus = options.eventBus;
+    this.workspace = options.workspace;
     this.startTime = Date.now();
 
     this.stateMachine = new RunStateMachine("IDLE");

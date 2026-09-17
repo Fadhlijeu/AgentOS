@@ -76,26 +76,33 @@ The AgentOS codebase is structured as a strictly acyclic dependency graph across
     - Zod schema validates input arguments before touching system
           ↓
  6. PermissionEngine Gate
+    - Deny-by-default filesystem access (explicit read/write required unless trusted mode)
     - Canonical path checking (`isPathInside`, traversal blocking)
-    - Terminal executable whitelist & chaining operator rejection (`parseCommand`)
-    - Browser & HTTP origin allow/deny policies and protocol checks (`http:`, `https:` only)
+    - Terminal executable allowlist & chaining operator rejection (`parseCommand`)
+    - Exact-origin matching and subpath filtering (prevents prefix bypass)
+    - SSRF private/internal IP blocking (127.0.0.0/8, 10.0.0.0/8, 169.254.169.254, etc.)
     - Working directory (`cwd`) boundary enforcement
           ↓
  7. ApprovalManager Gate (Human-in-the-Loop)
     - High & critical risk tools require explicit human approval (console / UI / API)
+    - Integrated with `AbortSignal` for immediate cancellation
     - Denials gracefully feed back into planner as observations without crashing
           ↓
  8. Execution Engine / Upstream Adapter
-    - Local Filesystem / OpenHands Workspace
-    - Terminal / Open Interpreter Subprocess Runner
+    - Local Filesystem / OpenHands-Compatible Workspace
+    - Terminal / Monitored Subprocess Runner (Open Interpreter inspired)
     - Playwright Real Browser / Virtual Browser Session
     - HTTP Request with AbortSignal cancellation
           ↓
- 9. EventBus Dispatch & Storage Persistence
+ 9. Secret Redaction Layer
+    - `redactSecrets()` deep-clones and sanitizes sensitive headers (Authorization, cookies), API keys, and passwords
+    - Events, traces, and SQLite storage only receive sanitized copies; live execution uses original data
+          ↓
+ 10. EventBus Dispatch & Storage Persistence
     - Structured events emitted (`tool.requested`, `tool.started`, `tool.completed`, `tool.failed`)
     - Automatically committed to SQLiteStore (`tool_calls`, `events`, `runs`)
           ↓
- 10. Observability & Memory Feedback
+ 11. Observability & Memory Feedback
     - Tracer records timing spans and tokens
     - Task outcomes remembered into long-term memory (`memory.updated`)
     - Final AgentResult synthesized
@@ -105,16 +112,16 @@ The AgentOS codebase is structured as a strictly acyclic dependency graph across
 
 ## 3. Upstream Integrations & Provenance
 
-AgentOS integrates four core open-source projects via isolated adapter layers:
+AgentOS implements native execution systems inspired by and protocol-compatible with four core open-source projects:
 
 1. **OpenHands Software Agent SDK** (`22c85eb0e0db8f4386380d095e9fe6933af2e65f`):
-   - Bridged via `OpenHandsWorkspaceAdapter` and `OpenHandsEventMapper`.
+   - Protocol-compatible adapter via `OpenHandsWorkspaceAdapter` and `OpenHandsEventMapper`.
 2. **Browser Use** (`d8110c5ff87ccba887aaa726cdb780f2f84bef8d`):
-   - Informs browser perception-action loop schemas and DOM interactive element extraction.
+   - Design reference for browser perception-action loop schemas and DOM interactive element extraction.
 3. **Open Browser Use** (`7765002ac88040aedc781be89afe68475a9d6c88`):
-   - Playwright-shaped SDK conventions implemented in `PlaywrightBrowserProvider`.
+   - Architectural pattern reference for stealth launch flags, session isolation, and locator conventions.
 4. **Open Interpreter** (`5db50b2e93224dda720462f02fc2858cbd112eb5`):
-   - Multi-language subprocess execution bridged via `OpenInterpreterAdapter`.
+   - Design reference for multi-language code execution patterns, implemented natively via monitored subprocesses.
 
 All projects are documented in [`THIRD_PARTY.md`](file:///D:/PROJECT/AgentOS/THIRD_PARTY.md) and [`integrations/`](file:///D:/PROJECT/AgentOS/integrations/).
 

@@ -37,6 +37,8 @@ export interface PermissionPolicy {
     allowOrigins?: string[];
     /** Origins explicitly blocked from navigation. */
     denyOrigins?: string[];
+    /** If true, permits navigation to private/internal network addresses (e.g. 127.0.0.1, localhost). Default: false */
+    allowPrivateNetworks?: boolean;
   };
 
   http?: {
@@ -44,6 +46,8 @@ export interface PermissionPolicy {
     allowOrigins?: string[];
     /** Origins explicitly blocked. Takes priority over allowOrigins. */
     denyOrigins?: string[];
+    /** If true, permits HTTP requests to private/internal network addresses (e.g. 127.0.0.1, localhost). Default: false */
+    allowPrivateNetworks?: boolean;
   };
 
   approval?: {
@@ -81,6 +85,40 @@ export function isPathInside(parent: string, child: string): boolean {
   return !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+// ─── SSRF Private IP Detection ───────────────────────────────────────────────
+
+/**
+ * Checks whether a hostname resolves to a private/internal IP range.
+ * Blocks SSRF attacks targeting internal services (cloud metadata, localhost, etc.).
+ */
+function isPrivateHostname(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+
+  // Obvious local hostnames
+  if (lower === "localhost" || lower === "0.0.0.0" || lower === "[::1]") return true;
+
+  // IPv6 loopback
+  if (lower === "::1") return true;
+
+  // IPv4 private ranges
+  const ipv4Match = lower.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [, a, b] = ipv4Match.map(Number);
+    if (a === 127) return true;                          // 127.0.0.0/8
+    if (a === 10) return true;                           // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12
+    if (a === 192 && b === 168) return true;              // 192.168.0.0/16
+    if (a === 169 && b === 254) return true;              // 169.254.0.0/16 (link-local / cloud metadata)
+    if (a === 0) return true;                            // 0.0.0.0/8
+  }
+
+  // IPv6 private ranges (simplified)
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;  // fc00::/7 (ULA)
+  if (lower.startsWith("fe80")) return true;                           // fe80::/10 (link-local)
+
+  return false;
+}
+
 // ─── Permission Engine ───────────────────────────────────────────────────────
 
 export class PermissionEngine {
@@ -115,8 +153,23 @@ export class PermissionEngine {
       return this.checkHttp(input);
     }
 
-    // If trusted mode or no category restrictions apply
-    return { allowed: true };
+    // ── Code interpreter checks (HIGH risk tools) ──────────────────────
+    if (normalizedName === "code_interpret") {
+      if (this.policy.trusted) return { allowed: true };
+      // code_interpret is gated by approval, but permission check still passes
+      // since the approval manager handles the risk-level gate
+      return { allowed: true };
+    }
+
+    // Deny uncategorized/unknown tools unless trusted mode is enabled.
+    // This prevents bypassing the permission system by inventing tool names.
+    if (this.policy.trusted) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: `Unknown tool category "${toolName}". Configure permissions or enable trusted mode.`,
+    };
   }
 
   /** Whether human approval is needed for the given risk level. */
@@ -156,11 +209,14 @@ export class PermissionEngine {
   ): PermissionDecision {
     const fsPolicy = this.policy.filesystem;
 
-    // Secure by default: if filesystem is not configured and not trusted, require explicit permission
+    // DENY-BY-DEFAULT: If no filesystem policy configured and not trusted, deny all filesystem access.
     if (!fsPolicy && !this.policy.trusted) {
-      // If fully unconfigured, allow in v0.1 only if no restrictions were supplied
-      return { allowed: true };
+      return {
+        allowed: false,
+        reason: "Filesystem access denied by default. Configure filesystem permissions (read/write paths) or enable trusted mode.",
+      };
     }
+    // Trusted mode with no explicit policy → allow all
     if (!fsPolicy) return { allowed: true };
 
     const filePath = String(input.path ?? "");
@@ -170,7 +226,14 @@ export class PermissionEngine {
       toolName === "filesystem_list" ||
       toolName === "filesystem_exists";
 
-    if (isRead && fsPolicy.read) {
+    if (isRead) {
+      // PARTIAL-POLICY DENY: If read capability is not explicitly granted, deny.
+      if (!fsPolicy.read) {
+        return {
+          allowed: false,
+          reason: `Filesystem read access not configured. Add "read" paths to filesystem permissions.`,
+        };
+      }
       if (!this.isPathAllowed(filePath, fsPolicy.read)) {
         return {
           allowed: false,
@@ -183,7 +246,14 @@ export class PermissionEngine {
       toolName === "filesystem_write" ||
       toolName === "filesystem_delete";
 
-    if (isWrite && fsPolicy.write) {
+    if (isWrite) {
+      // PARTIAL-POLICY DENY: If write capability is not explicitly granted, deny.
+      if (!fsPolicy.write) {
+        return {
+          allowed: false,
+          reason: `Filesystem write access not configured. Add "write" paths to filesystem permissions.`,
+        };
+      }
       if (!this.isPathAllowed(filePath, fsPolicy.write)) {
         return {
           allowed: false,
@@ -197,25 +267,32 @@ export class PermissionEngine {
       const source = String(input.source ?? "");
       const destination = String(input.destination ?? "");
 
-      if (fsPolicy.read && !this.isPathAllowed(source, fsPolicy.read)) {
+      // Move mutates the destination, so write capability is mandatory
+      if (!fsPolicy.write) {
         return {
           allowed: false,
-          reason: `Move source path "${source}" is outside allowed read paths`,
+          reason: `Filesystem write access not configured. Move requires write permission on source and destination.`,
         };
       }
-      if (fsPolicy.write) {
-        if (!this.isPathAllowed(source, fsPolicy.write)) {
-          return {
-            allowed: false,
-            reason: `Move source path "${source}" is outside allowed write paths`,
-          };
-        }
-        if (!this.isPathAllowed(destination, fsPolicy.write)) {
-          return {
-            allowed: false,
-            reason: `Move destination path "${destination}" is outside allowed write paths: ${fsPolicy.write.join(", ")}`,
-          };
-        }
+
+      // Source path verification: must be within read paths (if configured) or write paths
+      const sourceAllowed = fsPolicy.read
+        ? this.isPathAllowed(source, fsPolicy.read) || this.isPathAllowed(source, fsPolicy.write)
+        : this.isPathAllowed(source, fsPolicy.write);
+
+      if (!sourceAllowed) {
+        return {
+          allowed: false,
+          reason: `Move source path "${source}" is outside allowed paths`,
+        };
+      }
+
+      // Destination path verification: must be strictly inside allowed write paths
+      if (!this.isPathAllowed(destination, fsPolicy.write)) {
+        return {
+          allowed: false,
+          reason: `Move destination path "${destination}" is outside allowed write paths: ${fsPolicy.write.join(", ")}`,
+        };
       }
     }
 
@@ -318,32 +395,72 @@ export class PermissionEngine {
       };
     }
 
-    const origin = parsedUrl.origin;
     const browserPolicy = this.policy.browser;
     const httpPolicy = this.policy.http;
 
-    // Check deny list (from browser policy or general http policy)
+    // SSRF protection: Block navigation to private/internal IP ranges
+    const allowPrivate = this.policy.trusted || browserPolicy?.allowPrivateNetworks;
+    if (!allowPrivate && isPrivateHostname(parsedUrl.hostname)) {
+      return {
+        allowed: false,
+        reason: `SSRF protection: navigation to private/internal address "${parsedUrl.hostname}" is blocked. Use trusted mode or set allowPrivateNetworks: true to override.`,
+      };
+    }
+
+    const origin = parsedUrl.origin;
+
+    // Check deny list — EXACT ORIGIN + OPTIONAL SUBPATH MATCHING (no startsWith prefix spoofing)
     const denyList = [
       ...(browserPolicy?.denyOrigins ?? []),
       ...(httpPolicy?.denyOrigins ?? []),
     ];
-    if (
-      denyList.some(
-        (denied) => urlStr.startsWith(denied) || origin === denied
-      )
-    ) {
-      return {
-        allowed: false,
-        reason: `Origin or URL "${urlStr}" is explicitly denied by security policy`,
-      };
+    for (const denied of denyList) {
+      try {
+        const deniedUrl = new URL(denied);
+        // Only applies if exact origin matches (prevents example.com.evil.com bypass)
+        if (deniedUrl.origin === origin) {
+          if (deniedUrl.pathname && deniedUrl.pathname !== "/") {
+            if (parsedUrl.pathname.startsWith(deniedUrl.pathname)) {
+              return {
+                allowed: false,
+                reason: `URL "${urlStr}" is explicitly denied by security policy (${denied})`,
+              };
+            }
+          } else {
+            return {
+              allowed: false,
+              reason: `Origin "${origin}" is explicitly denied by security policy`,
+            };
+          }
+        }
+      } catch {
+        if (origin === denied || urlStr === denied) {
+          return {
+            allowed: false,
+            reason: `Origin "${origin}" is explicitly denied by security policy`,
+          };
+        }
+      }
     }
 
-    // Check allow list
+    // Check allow list — EXACT ORIGIN + OPTIONAL SUBPATH MATCHING
     const allowList = browserPolicy?.allowOrigins ?? httpPolicy?.allowOrigins;
     if (allowList && allowList.length > 0) {
-      const isAllowed = allowList.some(
-        (allowed) => origin === allowed || urlStr.startsWith(allowed)
-      );
+      const isAllowed = allowList.some((allowed) => {
+        if (allowed === "*") return true;
+        try {
+          const allowedUrl = new URL(allowed);
+          if (allowedUrl.origin !== origin) {
+            return false;
+          }
+          if (allowedUrl.pathname && allowedUrl.pathname !== "/") {
+            return parsedUrl.pathname.startsWith(allowedUrl.pathname);
+          }
+          return true;
+        } catch {
+          return origin === allowed;
+        }
+      });
       if (!isAllowed) {
         return {
           allowed: false,
@@ -377,6 +494,16 @@ export class PermissionEngine {
     }
 
     const httpPolicy = this.policy.http;
+
+    // SSRF protection: Block HTTP requests to private/internal IP ranges
+    const allowPrivate = this.policy.trusted || httpPolicy?.allowPrivateNetworks;
+    if (!allowPrivate && isPrivateHostname(parsedUrl.hostname)) {
+      return {
+        allowed: false,
+        reason: `SSRF protection: HTTP request to private/internal address "${parsedUrl.hostname}" is blocked. Use trusted mode or set allowPrivateNetworks: true to override.`,
+      };
+    }
+
     if (!httpPolicy && !this.policy.trusted) {
       return { allowed: true };
     }
@@ -384,24 +511,54 @@ export class PermissionEngine {
 
     const origin = parsedUrl.origin.toLowerCase();
 
-    // Check deny list first
+    // Check deny list first — origin + subpath aware
     if (httpPolicy.denyOrigins) {
-      const isDenied = httpPolicy.denyOrigins.some(
-        (o) => origin === o.toLowerCase().replace(/\/$/, "")
-      );
-      if (isDenied) {
-        return {
-          allowed: false,
-          reason: `Origin "${origin}" is explicitly blocked by HTTP policy`,
-        };
+      for (const denied of httpPolicy.denyOrigins) {
+        try {
+          const deniedUrl = new URL(denied);
+          if (deniedUrl.origin.toLowerCase() === origin) {
+            if (deniedUrl.pathname && deniedUrl.pathname !== "/") {
+              if (parsedUrl.pathname.startsWith(deniedUrl.pathname)) {
+                return {
+                  allowed: false,
+                  reason: `URL "${urlStr}" is explicitly blocked by HTTP policy (${denied})`,
+                };
+              }
+            } else {
+              return {
+                allowed: false,
+                reason: `Origin "${origin}" is explicitly blocked by HTTP policy`,
+              };
+            }
+          }
+        } catch {
+          if (origin === denied.toLowerCase().replace(/\/$/, "")) {
+            return {
+              allowed: false,
+              reason: `Origin "${origin}" is explicitly blocked by HTTP policy`,
+            };
+          }
+        }
       }
     }
 
-    // Check allow list
+    // Check allow list — origin + subpath aware
     if (httpPolicy.allowOrigins) {
-      const isAllowed = httpPolicy.allowOrigins.some(
-        (o) => origin === o.toLowerCase().replace(/\/$/, "")
-      );
+      const isAllowed = httpPolicy.allowOrigins.some((allowed) => {
+        if (allowed === "*") return true;
+        try {
+          const allowedUrl = new URL(allowed);
+          if (allowedUrl.origin.toLowerCase() !== origin) {
+            return false;
+          }
+          if (allowedUrl.pathname && allowedUrl.pathname !== "/") {
+            return parsedUrl.pathname.startsWith(allowedUrl.pathname);
+          }
+          return true;
+        } catch {
+          return origin === allowed.toLowerCase().replace(/\/$/, "");
+        }
+      });
       if (!isAllowed) {
         return {
           allowed: false,
@@ -418,3 +575,4 @@ export class PermissionEngine {
 export { parseCommand, type ParsedCommand, type ParseResult } from "./command-parser";
 export { ApprovalManager, ConsoleApprovalHandler, AutoApprovalHandler } from "./approval";
 export type { ApprovalHandler, ApprovalRequest } from "./approval";
+export { redactSecrets } from "./redactor";

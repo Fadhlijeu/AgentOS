@@ -139,9 +139,11 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       required: ["url"],
     },
     execute: async (input, ctx) => {
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const { url } = browserOpenSchema.parse(input);
       const session = await getSession();
 
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       await session.navigate(url);
 
       const title = await session.evaluate<string>("document.title").catch(() => "Unknown");
@@ -169,10 +171,12 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       },
       required: ["selector"],
     },
-    execute: async (input) => {
+    execute: async (input, ctx) => {
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const { selector } = browserClickSchema.parse(input);
       const session = await getSession();
 
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       await session.click(selector);
       const title = await session.evaluate<string>("document.title").catch(() => "");
       const url = await session.evaluate<string>("window.location.href").catch(() => "");
@@ -201,10 +205,12 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       },
       required: ["selector", "text"],
     },
-    execute: async (input) => {
+    execute: async (input, ctx) => {
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const { selector, text } = browserTypeSchema.parse(input);
       const session = await getSession();
 
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       await session.type(selector, text);
       return `Typed "${text}" into "${selector}".`;
     },
@@ -220,7 +226,8 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       type: "object",
       properties: {},
     },
-    execute: async () => {
+    execute: async (_input, ctx) => {
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const session = await getSession();
       if (session.observe) {
         const obs = await session.observe();
@@ -252,7 +259,8 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       type: "object",
       properties: {},
     },
-    execute: async () => {
+    execute: async (_input, ctx) => {
+      if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const session = await getSession();
       const buffer = await session.screenshot();
       const base64 = Buffer.from(buffer).toString("base64");

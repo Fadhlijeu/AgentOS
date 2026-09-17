@@ -14,6 +14,13 @@ export interface PlaywrightBrowserOptions {
   executablePath?: string;
   viewport?: { width: number; height: number };
   timeoutMs?: number;
+  /**
+   * Whether to disable the Chromium sandbox.
+   * Default: false (sandbox ENABLED for security).
+   * Set to true only in CI/container environments where sandbox cannot run.
+   * Auto-detected from CI/DOCKER/KUBERNETES_SERVICE_HOST env vars if not set.
+   */
+  sandbox?: boolean;
 }
 
 /**
@@ -223,14 +230,25 @@ export class PlaywrightBrowserProvider implements BrowserProviderAdapter {
     const headless = (options?.headless as boolean | undefined) ?? this.options.headless ?? true;
     const defaultBrowser = findDefaultBrowserExecutable();
 
+    // Determine sandbox policy:
+    // - Explicit option takes priority
+    // - Auto-detect CI/container environments
+    // - Default: sandbox ENABLED (secure for desktop/local mode)
+    const isCIEnvironment = !!(process.env.CI || process.env.DOCKER || process.env.KUBERNETES_SERVICE_HOST);
+    const sandboxEnabled = this.options.sandbox ?? !isCIEnvironment;
+
+    const launchArgs = [
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+    ];
+
+    if (!sandboxEnabled) {
+      launchArgs.push("--no-sandbox", "--disable-setuid-sandbox");
+    }
+
     const launchOptions: any = {
       headless,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-blink-features=AutomationControlled",
-      ],
+      args: launchArgs,
     };
 
     if (this.options.executablePath) {

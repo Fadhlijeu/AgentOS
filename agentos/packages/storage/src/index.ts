@@ -27,6 +27,7 @@ export interface PersistenceStore {
   getMemory(tier: string, key: string): MemoryRecord | null;
   getMemoriesByTier(tier: string): MemoryRecord[];
   deleteMemory(tier: string, key: string): void;
+  deleteMemoryByPrefix(tier: string, keyPrefix: string): void;
   clearMemoryTier(tier: string): void;
 
   // State (key-value)
@@ -296,6 +297,12 @@ export class SQLiteStore implements PersistenceStore {
     this.db
       .prepare("DELETE FROM memory_entries WHERE tier = ? AND key = ?")
       .run(tier, key);
+  }
+
+  deleteMemoryByPrefix(tier: string, keyPrefix: string): void {
+    this.db
+      .prepare("DELETE FROM memory_entries WHERE tier = ? AND key LIKE ?")
+      .run(tier, `${keyPrefix}%`);
   }
 
   clearMemoryTier(tier: string): void {

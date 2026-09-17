@@ -20,18 +20,19 @@ To ensure complete architectural honesty (per `audit_0.2.md` guidelines), every 
 | :--- | :---: | :--- |
 | **ReAct Agent Loop** | `Implemented` | Autonomous observe → reason → act → verify loop with iteration boundaries |
 | **Model Abstraction** | `Implemented` | `OpenAIProvider`, `MockModelProvider`, multi-tool schema definitions |
-| **Permission Engine** | `Implemented` | Path canonicalization (`isPathInside`), command parsing without chaining (`parseCommand`), origin gating, cwd jailing |
-| **Human Approval** | `Implemented` | Risk-level gating (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), interactive console & custom UI handlers |
+| **Permission Engine** | `Implemented` | Deny-by-default filesystem security, path canonicalization (`isPathInside`), AST command parser (`parseCommand`), exact-origin matching, SSRF protection |
+| **Human Approval** | `Implemented` | Risk-level gating (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), interactive console & custom UI handlers with `AbortSignal` |
+| **Secret Redaction** | `Implemented` | Automatic redaction of sensitive headers, API keys, passwords, and tokens before event emission and persistence |
 | **Per-Run Lifecycle & State Machine**| `Implemented` | `RunStateMachine`, per-run `RunContext` with real `AbortSignal` cancellation and concurrent run isolation |
 | **Event Bus** | `Implemented` | High-throughput typed `EventBus` with wildcard matching and traceable events (`runId`, `taskId`) |
-| **Durable Tiered Memory** | `Implemented` | SQLite-backed `working`, `long-term`, and `semantic` memory tiers with automated context retrieval and outcome persistence |
+| **Durable Tiered Memory** | `Implemented` | SQLite-backed per-run `working`, `long-term`, and lexical keyword-scored memory retrieval (vector embeddings planned) |
 | **SQLite Persistence** | `Implemented` | WAL-mode SQLite storage for `runs`, `events`, `state`, `tool_calls`, and `memory_entries` with fail-fast policies |
 | **Observability & Tracing** | `Implemented` | Structured latency spans, token metrics, and exportable JSON execution traces |
 | **Workspace Runtime Jailing** | `Implemented` | `LocalWorkspace` and `InMemoryWorkspace` enforcing boundary-aware traversal prevention |
-| **HTTP / API Tool** | `Implemented` | `http_request` with Zod validation, cancellation support, and origin allow/deny lists |
-| **Real Browser Automation** | `Adapter available` | `PlaywrightBrowserProvider` driving real Chrome/Edge; `VirtualBrowserProvider` available for unit tests |
-| **Code Interpreter Execution** | `Adapter available` | `OpenInterpreterAdapter` executing Python/Shell/Node in monitored subprocesses |
-| **OpenHands Ecosystem Adapter** | `Adapter available` | `OpenHandsWorkspaceAdapter` and `OpenHandsEventMapper` translating actions & observations |
+| **HTTP / API Tool** | `Implemented` | `http_request` with Zod validation, cancellation support, SSRF defense, and origin allow/deny lists |
+| **Real Browser Automation** | `AgentOS Native` | `PlaywrightBrowserProvider` driving real Chrome/Edge engines (inspired by Browser Use & Open Browser Use patterns) |
+| **Code Interpreter Execution** | `AgentOS Native` | Subprocess execution running Python/Node/Shell with strict command validation (inspired by Open Interpreter) |
+| **OpenHands Compatibility Adapter** | `Compatible Adapter` | `OpenHandsWorkspaceAdapter` and `OpenHandsEventMapper` translating actions & observations |
 | **Audit Timeline Reconstruction** | `Implemented` | `agent.reconstructTimeline(runId)` reconstructing runs, events, and tool logs from SQLite |
 | **Deterministic Simulation Re-Execution** | `Experimental` | Re-running reasoning loop against recorded mock responses |
 | **OS-Level Container Sandboxing** | `Planned` | Docker / Firecracker microVM execution for untrusted host commands |
@@ -60,15 +61,15 @@ To ensure complete architectural honesty (per `audit_0.2.md` guidelines), every 
  ▼    ▼             ▼             ▼
 Web  Files       Terminal      Interpreter / Upstream
  │
- ├── Playwright Real Browser (Chrome/Edge)
+ ├── Playwright Real Browser (AgentOS Native Engine)
  ├── VirtualBrowserSession (Fast Unit Tests)
- ├── Open Browser Use Bridge
- └── Browser Use Schema Patterns
+ ├── Open Browser Use Inspired Launch Policies
+ └── Browser Use Inspired Action Schemas
 ```
 
-* **🧠 Brain**: LLM Provider abstraction, ReAct task decomposition, SQLite durable memory, and prompt context injection.
-* **✋ Hands**: Node.js & workspace filesystem tools, hardened terminal execution, HTTP request tools, real Playwright browser automation, and Open Interpreter multi-language code execution.
-* **⚡ Nervous System**: Strongly typed `EventBus`, capability-based `PermissionEngine`, Human-in-the-Loop `ApprovalManager`, SQLite persistence, and structured `Tracer`.
+* **🧠 Brain**: LLM Provider abstraction, ReAct task decomposition, SQLite durable memory (lexical keyword retrieval), and prompt context injection.
+* **✋ Hands**: Node.js & workspace filesystem tools, hardened terminal execution, HTTP request tools, real Playwright browser automation, and multi-language code execution.
+* **⚡ Nervous System**: Strongly typed `EventBus`, capability-based `PermissionEngine` (deny-by-default, SSRF defense, secret redaction), Human-in-the-Loop `ApprovalManager`, SQLite persistence, and structured `Tracer`.
 
 ---
 
@@ -167,15 +168,15 @@ pnpm run typecheck
 
 ---
 
-## 📚 Third-Party Provenance & Upstream Bridges
+## 📚 Third-Party Provenance & Upstream Inspiration
 
-AgentOS incorporates design patterns and adapters from the following open-source projects:
-* [OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk) (`22c85eb0e0db8f4386380d095e9fe6933af2e65f`) — MIT
-* [Browser Use](https://github.com/browser-use/browser-use) (`d8110c5ff87ccba887aaa726cdb780f2f84bef8d`) — MIT
-* [Open Browser Use](https://github.com/open-browser-use/open-browser-use) (`7765002ac88040aedc781be89afe68475a9d6c88`) — MIT
-* [Open Interpreter](https://github.com/openinterpreter/openinterpreter) (`5db50b2e93224dda720462f02fc2858cbd112eb5`) — Apache-2.0
+AgentOS implements native TypeScript execution capabilities inspired by and protocol-compatible with the following open-source projects:
+* [OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk) (`22c85eb0e0db8f4386380d095e9fe6933af2e65f`) — MIT: Workspace abstraction and action/observation event mapping protocol.
+* [Browser Use](https://github.com/browser-use/browser-use) (`d8110c5ff87ccba887aaa726cdb780f2f84bef8d`) — MIT: Perception-action browser loop schemas and DOM interactive element extraction.
+* [Open Browser Use](https://github.com/open-browser-use/open-browser-use) (`7765002ac88040aedc781be89afe68475a9d6c88`) — MIT: Stealth launch policies, locator conventions, and session management paradigms.
+* [Open Interpreter](https://github.com/openinterpreter/openinterpreter) (`5db50b2e93224dda720462f02fc2858cbd112eb5`) — Apache-2.0: Multi-language code execution patterns and output streaming.
 
-Full provenance, license verification, and integration contracts are documented in [THIRD_PARTY.md](./THIRD_PARTY.md) and [integrations/](./integrations/).
+Full provenance records, exact commit SHAs, license terms, and layer ownership boundaries are documented in [THIRD_PARTY.md](./THIRD_PARTY.md) and [integrations/](./integrations/).
 
 ---
 
