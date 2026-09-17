@@ -91,9 +91,19 @@ function terminalExec(): Tool {
         ]);
         const needsShell = isWindows && CMD_BUILTINS.has(executable.toLowerCase());
 
-        // Spawn child process with isolated args vector
+        // Filter sensitive keys from child process environment
+        const sensitivePattern = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE|DATABASE|URL|CONN_STR)/i;
+        const childEnv: NodeJS.ProcessEnv = {};
+        for (const [k, v] of Object.entries(process.env)) {
+          if (v && !sensitivePattern.test(k)) {
+            childEnv[k] = v;
+          }
+        }
+
+        // Spawn child process with isolated args vector and sanitized env
         const child = spawn(executable, args, {
           cwd,
+          env: childEnv,
           shell: needsShell,
           windowsHide: true,
         });

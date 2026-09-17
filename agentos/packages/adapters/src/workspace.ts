@@ -39,18 +39,20 @@ export class LocalWorkspace implements WorkspaceAdapter {
 
   constructor(options: LocalWorkspaceOptions) {
     this.id = options.id ?? generateId("ws");
-    this.rootPath = path.resolve(options.rootPath);
+    const rawRoot = path.resolve(options.rootPath);
 
     if (options.createIfNotExists ?? true) {
-      if (!fs.existsSync(this.rootPath)) {
-        fs.mkdirSync(this.rootPath, { recursive: true });
+      if (!fs.existsSync(rawRoot)) {
+        fs.mkdirSync(rawRoot, { recursive: true });
       }
     }
+    this.rootPath = fs.existsSync(rawRoot) ? fs.realpathSync(rawRoot) : rawRoot;
   }
 
   /**
    * Resolves a relative path within this workspace.
-   * Throws `WorkspacePathViolationError` if the path escapes the root directory.
+   * Throws `WorkspacePathViolationError` if the path escapes the root directory
+   * or traverses outside through a symlink/junction.
    */
   resolvePath(relativePath: string): string {
     const target = path.resolve(this.rootPath, relativePath);
@@ -67,6 +69,13 @@ export class LocalWorkspace implements WorkspaceAdapter {
 
   async write(relativePath: string, content: string): Promise<void> {
     const absPath = this.resolvePath(relativePath);
+    // Defense-in-depth: If file is already an existing symlink pointing outside, reject
+    if (fs.existsSync(absPath)) {
+      const realTarget = fs.realpathSync(absPath);
+      if (!isPathInside(this.rootPath, realTarget)) {
+        throw new WorkspacePathViolationError(relativePath, this.rootPath);
+      }
+    }
     await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
     await fs.promises.writeFile(absPath, content, "utf-8");
   }

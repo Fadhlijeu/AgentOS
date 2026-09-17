@@ -234,9 +234,10 @@ export class Agent {
       }
     }
 
+    // If cancellation was requested before any run started, cancel immediately
     if (this.pendingStatus === "CANCELLED") {
-      runContext.cancel();
       this.pendingStatus = "IDLE";
+      runContext.cancel();
     }
 
     this.activeRuns.set(runId, runContext);
@@ -283,17 +284,36 @@ export class Agent {
   /**
    * Cancel the most recently started task run immediately, propagating AbortSignal
    * to any running tool processes or LLM requests.
+   * Only cancels active runs — never leaves sticky state that cancels future runs.
    */
-  async cancel(): Promise<void> {
-    this.pendingStatus = "CANCELLED";
-    if (this.lastRun) {
+  async cancel(runId?: string): Promise<void> {
+    if (runId) {
+      const target = this.activeRuns.get(runId);
+      if (target) {
+        await target.cancel();
+      }
+      return;
+    }
+
+    if (this.lastRun && (this.lastRun.getStatus() === "RUNNING" || this.lastRun.getStatus() === "PAUSED")) {
       await this.lastRun.cancel();
+    } else if (this.activeRuns.size > 0) {
+      // Cancel any remaining active runs
+      for (const run of this.activeRuns.values()) {
+        await run.cancel();
+      }
+    } else if (!this.lastRun) {
+      // Pre-run cancellation (agent initialized but no task run started yet)
+      this.pendingStatus = "CANCELLED";
     }
   }
 
-  /** Get the current status of the most recent run (or pending status). */
+  /** Get the current status of the most recent run (or IDLE if none). */
   getStatus(): AgentStatus {
-    return this.lastRun?.status ?? this.pendingStatus;
+    if (this.pendingStatus === "CANCELLED") {
+      return "CANCELLED";
+    }
+    return this.lastRun?.status ?? "IDLE";
   }
 
   /** Get a specific run by its runId. */
@@ -406,6 +426,14 @@ export class Agent {
     try {
       if (runContext.isCancelled()) {
         const finalAnswer = "Task cancelled by user.";
+        this.eventBus.emit("task.cancelled", {
+          runId,
+          taskId,
+          data: {
+            iterations: 0,
+            durationMs: 0,
+          },
+        });
         this.store.saveRun({
           runId,
           taskId,
@@ -598,42 +626,64 @@ export class Agent {
         ? "COMPLETED"
         : "ERROR";
 
-      // Emit completion event
-      this.eventBus.emit("task.completed", {
-        runId,
-        taskId,
-        data: {
-          success: isSuccess,
-          iterations: runContext.iteration,
-          durationMs,
-        },
-      });
+      // Emit completion or cancellation event
+      if (finalStatus === "CANCELLED") {
+        this.eventBus.emit("task.cancelled", {
+          runId,
+          taskId,
+          data: {
+            iterations: runContext.iteration,
+            durationMs,
+          },
+        });
+      } else {
+        this.eventBus.emit("task.completed", {
+          runId,
+          taskId,
+          data: {
+            success: isSuccess,
+            iterations: runContext.iteration,
+            durationMs,
+          },
+        });
+      }
 
       const events = this.eventBus.getEventsByRun(runId);
       this.tracer.recordTaskEnd(runId, taskId, isSuccess, durationMs);
 
       // Update run record
-      this.store.saveRun({
-        runId,
-        taskId,
-        task,
-        status: finalStatus,
-        output: finalAnswer,
-        error: lastError ?? null,
-        startedAt: startTime,
-        completedAt: Date.now(),
-        iterations: runContext.iteration,
-        totalTokens: runContext.usage.totalTokens,
-      });
+      try {
+        this.store.saveRun({
+          runId,
+          taskId,
+          task,
+          status: finalStatus,
+          output: finalAnswer,
+          error: lastError ?? null,
+          startedAt: startTime,
+          completedAt: Date.now(),
+          iterations: runContext.iteration,
+          totalTokens: runContext.usage.totalTokens,
+        });
+      } catch (storeErr) {
+        if (this.persistenceMode === "required") {
+          throw new Error(`Persistence required: failed to save run record: ${(storeErr as Error).message}`);
+        }
+        this.eventBus.emit("persistence.error", {
+          runId,
+          taskId,
+          data: { operation: "saveRun", error: (storeErr as Error).message },
+        });
+      }
 
-      // 2. Remember task outcome in durable long-term memory
+      // 2. Remember task outcome in durable long-term memory (with redacted output)
       try {
         await this.memory.remember(
           "long-term",
           `task_outcome:${taskId}`,
           {
             task,
-            output: finalAnswer,
+            output: redactSecrets(finalAnswer),
             status: finalStatus,
             iterations: runContext.iteration,
             timestamp: Date.now(),
@@ -649,8 +699,15 @@ export class Agent {
             action: "stored",
           },
         });
-      } catch {
-        // Non-blocking in best-effort
+      } catch (memErr) {
+        if (this.persistenceMode === "required") {
+          throw new Error(`Persistence required: failed to store task outcome in memory: ${(memErr as Error).message}`);
+        }
+        this.eventBus.emit("persistence.error", {
+          runId,
+          taskId,
+          data: { operation: "memory.remember", error: (memErr as Error).message },
+        });
       }
 
       if (this.verbose) {
@@ -830,15 +887,17 @@ export class Agent {
         ctx
       );
       const toolDuration = Date.now() - toolStart;
+      const redactedArgs = redactSecrets(toolCall.arguments as Record<string, unknown>);
+      const redactedResult = redactSecrets(result);
 
       this.tracer.recordToolCall(
         runId,
         taskId,
         toolCall.name,
-        toolCall.arguments as Record<string, unknown>,
+        redactedArgs,
         toolDuration
       );
-      this.tracer.recordToolResult(runId, taskId, toolCall.name, result);
+      this.tracer.recordToolResult(runId, taskId, toolCall.name, redactedResult);
 
       this.eventBus.emit("tool.completed", {
         runId,
@@ -850,33 +909,42 @@ export class Agent {
         },
       });
 
-      // Persist tool call record to storage
+      // Persist tool call record to storage with sanitized copies
       try {
         this.store.saveToolCall({
           id: generateId("call"),
           runId,
           taskId,
           toolName: toolCall.name,
-          arguments: toolCall.arguments as Record<string, unknown>,
-          result,
+          arguments: redactedArgs,
+          result: redactedResult,
           durationMs: toolDuration,
           error: null,
           timestamp: toolStart,
         });
-      } catch {
-        // Storage errors don't halt execution in best-effort mode
+      } catch (storeErr) {
+        if (this.persistenceMode === "required") {
+          throw new Error(`Persistence required: failed to save tool call: ${(storeErr as Error).message}`);
+        }
+        this.eventBus.emit("persistence.error", {
+          runId,
+          taskId,
+          data: { operation: "saveToolCall", error: (storeErr as Error).message },
+        });
       }
 
       return result;
     } catch (err) {
       const toolDuration = Date.now() - toolStart;
       const errorMsg = (err as Error).message;
+      const redactedArgs = redactSecrets(toolCall.arguments as Record<string, unknown>);
+      const redactedErrorMsg = redactSecrets(errorMsg);
 
       this.tracer.recordToolCall(
         runId,
         taskId,
         toolCall.name,
-        toolCall.arguments as Record<string, unknown>,
+        redactedArgs,
         toolDuration
       );
       this.tracer.recordToolResult(
@@ -884,7 +952,7 @@ export class Agent {
         taskId,
         toolCall.name,
         "",
-        errorMsg
+        redactedErrorMsg
       );
 
       this.eventBus.emit("tool.failed", {
@@ -892,26 +960,33 @@ export class Agent {
         taskId,
         data: {
           toolName: toolCall.name,
-          error: errorMsg,
+          error: redactedErrorMsg,
           durationMs: toolDuration,
         },
       });
 
-      // Persist failed tool call record to storage
+      // Persist failed tool call record to storage with sanitized copies
       try {
         this.store.saveToolCall({
           id: generateId("call"),
           runId,
           taskId,
           toolName: toolCall.name,
-          arguments: toolCall.arguments as Record<string, unknown>,
+          arguments: redactedArgs,
           result: null,
           durationMs: toolDuration,
-          error: errorMsg,
+          error: redactedErrorMsg,
           timestamp: toolStart,
         });
-      } catch {
-        // Storage errors don't halt execution in best-effort mode
+      } catch (storeErr) {
+        if (this.persistenceMode === "required") {
+          throw new Error(`Persistence required: failed to save failed tool call: ${(storeErr as Error).message}`);
+        }
+        this.eventBus.emit("persistence.error", {
+          runId,
+          taskId,
+          data: { operation: "saveToolCall", error: (storeErr as Error).message },
+        });
       }
 
       return `Error executing ${toolCall.name}: ${errorMsg}`;

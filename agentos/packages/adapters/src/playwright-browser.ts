@@ -50,6 +50,40 @@ function findDefaultBrowserExecutable(): { channel?: "chrome" | "msedge"; execut
 }
 
 /**
+ * Race a promise against an AbortSignal, executing an optional cleanup action on abort.
+ */
+async function withAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+  onAbortAction?: () => void
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    onAbortAction?.();
+    throw new Error("Operation cancelled by AbortSignal");
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      onAbortAction?.();
+      reject(new Error("Operation cancelled by AbortSignal"));
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (res) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(res);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      }
+    );
+  });
+}
+
+/**
  * A concrete BrowserSession running inside a real browser instance.
  */
 export class PlaywrightBrowserSession implements BrowserSession {
@@ -89,34 +123,45 @@ export class PlaywrightBrowserSession implements BrowserSession {
     return this.page;
   }
 
-  async navigate(url: string): Promise<void> {
+  async navigate(url: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
-    await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+
+    await withAbort(
+      this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
+      options?.signal,
+      () => {
+        this.page.evaluate(() => window.stop()).catch(() => {});
+      }
+    );
     this.url = this.page.url();
     this.title = await this.page.title();
   }
 
-  async click(selector: string): Promise<void> {
+  async click(selector: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
+    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
     const locator = this.page.locator(selector).first();
-    await locator.click({ timeout: 15000 });
+    await withAbort(locator.click({ timeout: 15000 }), options?.signal);
     // Update state after potential navigation or mutation
     this.url = this.page.url();
     this.title = await this.page.title();
   }
 
-  async type(selector: string, text: string): Promise<void> {
+  async type(selector: string, text: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
+    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
     const locator = this.page.locator(selector).first();
-    await locator.fill(text, { timeout: 15000 });
+    await withAbort(locator.fill(text, { timeout: 15000 }), options?.signal);
   }
 
-  async evaluate<T>(script: string): Promise<T> {
+  async evaluate<T>(script: string, options?: { signal?: AbortSignal }): Promise<T> {
     this.assertOpen();
-    return this.page.evaluate<T>(script);
+    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    return withAbort(this.page.evaluate<T>(script), options?.signal);
   }
 
-  async observe(): Promise<{
+  async observe(options?: { signal?: AbortSignal }): Promise<{
     url: string;
     title: string;
     content: string;
@@ -139,43 +184,47 @@ export class PlaywrightBrowserSession implements BrowserSession {
     }>;
   }> {
     this.assertOpen();
+    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
     this.url = this.page.url();
     this.title = await this.page.title();
 
-    // Extract interactive DOM elements from the real page
-    const observation = await this.page.evaluate(() => {
-      const interactiveNodes = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          'button, a[href], input, select, textarea, [role="button"], [onclick]'
-        )
-      );
+    // Extract interactive DOM elements from the real page with abort awareness
+    const observation = await withAbort(
+      this.page.evaluate(() => {
+        const interactiveNodes = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            'button, a[href], input, select, textarea, [role="button"], [onclick]'
+          )
+        );
 
-      const elements = interactiveNodes.slice(0, 50).map((el, index) => {
-        let selector = "";
-        if (el.id) {
-          selector = `#${el.id}`;
-        } else if (el.getAttribute("name")) {
-          selector = `[name="${el.getAttribute("name")}"]`;
-        } else if (el.classList.length > 0) {
-          selector = `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 2).join(".")}`;
-        } else {
-          selector = `${el.tagName.toLowerCase()}:nth-of-type(${index + 1})`;
-        }
+        const elements = interactiveNodes.slice(0, 50).map((el, index) => {
+          let selector = "";
+          if (el.id) {
+            selector = `#${el.id}`;
+          } else if (el.getAttribute("name")) {
+            selector = `[name="${el.getAttribute("name")}"]`;
+          } else if (el.classList.length > 0) {
+            selector = `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 2).join(".")}`;
+          } else {
+            selector = `${el.tagName.toLowerCase()}:nth-of-type(${index + 1})`;
+          }
 
-        const tag = el.tagName.toLowerCase();
-        const text = (el.innerText || el.textContent || "").trim().slice(0, 100);
-        const value = (el as HTMLInputElement).value || undefined;
-        const type = (el as HTMLInputElement).type || undefined;
-        const href = (el as HTMLAnchorElement).href || undefined;
+          const tag = el.tagName.toLowerCase();
+          const text = (el.innerText || el.textContent || "").trim().slice(0, 100);
+          const value = (el as HTMLInputElement).value || undefined;
+          const type = (el as HTMLInputElement).type || undefined;
+          const href = (el as HTMLAnchorElement).href || undefined;
 
-        return { selector, tag, text: text || undefined, value, type, href };
-      });
+          return { selector, tag, text: text || undefined, value, type, href };
+        });
 
-      const bodyText = (document.body?.innerText || "").trim().replace(/\s+/g, " ");
-      const contentSummary = bodyText.slice(0, 1000);
+        const bodyText = (document.body?.innerText || "").trim().replace(/\s+/g, " ");
+        const contentSummary = bodyText.slice(0, 1000);
 
-      return { elements, contentSummary };
-    });
+        return { elements, contentSummary };
+      }),
+      options?.signal
+    );
 
     return {
       url: this.url,
@@ -187,9 +236,13 @@ export class PlaywrightBrowserSession implements BrowserSession {
     };
   }
 
-  async screenshot(): Promise<Buffer> {
+  async screenshot(options?: { signal?: AbortSignal }): Promise<Buffer> {
     this.assertOpen();
-    const buffer = await this.page.screenshot({ type: "png", fullPage: false });
+    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    const buffer = await withAbort(
+      this.page.screenshot({ type: "png", fullPage: false }),
+      options?.signal
+    );
     return buffer;
   }
 

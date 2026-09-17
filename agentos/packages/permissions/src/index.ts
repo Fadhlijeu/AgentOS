@@ -5,7 +5,9 @@
 // Hardened with canonical path boundary verification, shell command sanitization,
 // cwd isolation, and secure-by-default execution.
 
+import * as fs from "fs";
 import * as path from "path";
+import * as dns from "dns";
 import type { RiskLevel } from "@agentos/core";
 import { parseCommand, type ParsedCommand } from "./command-parser";
 
@@ -26,34 +28,34 @@ export interface PermissionPolicy {
   };
 
   terminal?: {
-    /** Exact executables the agent is allowed to execute (e.g. ["git", "node", "npm"]). */
+    /** Executables permitted to run. If set, ONLY these are allowed. */
     allow?: string[];
-    /** Executables or command prefixes explicitly denied. Takes priority over allow. */
+    /** Executables strictly blocked. Takes precedence over allow. */
     deny?: string[];
   };
 
   browser?: {
-    /** Origins the agent may navigate to. */
+    /** Allowed origins, e.g. ["https://github.com"]. Default: all. */
     allowOrigins?: string[];
-    /** Origins explicitly blocked from navigation. */
+    /** Blocked origins. Takes precedence. */
     denyOrigins?: string[];
-    /** If true, permits navigation to private/internal network addresses (e.g. 127.0.0.1, localhost). Default: false */
+    /** Whether to allow navigating to private/local networks. Default: false. */
     allowPrivateNetworks?: boolean;
   };
 
   http?: {
-    /** Origins allowed for HTTP requests (e.g. ["https://api.github.com"]). */
+    /** Allowed HTTP origins/domains. */
     allowOrigins?: string[];
-    /** Origins explicitly blocked. Takes priority over allowOrigins. */
+    /** Blocked HTTP origins/domains. */
     denyOrigins?: string[];
-    /** If true, permits HTTP requests to private/internal network addresses (e.g. 127.0.0.1, localhost). Default: false */
+    /** Whether to allow requests to private/local networks. Default: false. */
     allowPrivateNetworks?: boolean;
   };
 
   approval?: {
-    /** Require human approval for tools at or above this risk level. Default: HIGH */
+    /** Lowest risk level that requires human approval. Default: "HIGH". */
     requireFor: RiskLevel;
-    /** How long to wait for approval before timing out (ms). Default: 60000 */
+    /** Timeout in milliseconds waiting for human response. Default: 60s. */
     timeoutMs?: number;
   };
 }
@@ -65,11 +67,48 @@ export interface PermissionDecision {
   reason?: string;
 }
 
-// ─── Path Boundary Helper ────────────────────────────────────────────────────
+// ─── Path Boundary Helper (Symlink & Junction Safe) ──────────────────────────
+
+/**
+ * Canonicalizes a path by resolving all symlinks, junctions, and reparse points.
+ * If the path itself does not exist, it traverses upward to find the nearest
+ * existing ancestor directory, canonicalizes that directory with realpathSync,
+ * and appends the remaining uncreated path segments.
+ */
+export function canonicalizePath(targetPath: string): string {
+  const resolved = path.resolve(targetPath);
+  try {
+    if (fs.existsSync(resolved)) {
+      return fs.realpathSync(resolved);
+    }
+  } catch {
+    // If realpathSync fails, fallback to ancestor search
+  }
+
+  // Find nearest existing ancestor directory
+  let current = resolved;
+  const trailingParts: string[] = [];
+
+  while (current && current !== path.dirname(current)) {
+    trailingParts.unshift(path.basename(current));
+    current = path.dirname(current);
+    try {
+      if (fs.existsSync(current)) {
+        const canonicalAncestor = fs.realpathSync(current);
+        return path.resolve(canonicalAncestor, ...trailingParts);
+      }
+    } catch {
+      // Continue walking upward
+    }
+  }
+
+  return resolved;
+}
 
 /**
  * Checks whether a child path resides strictly inside an allowed parent directory.
- * Resolves path traversal (..) and prevents boundary spoofing (e.g. /appSecret matching /app).
+ * Resolves lexical path traversal (..), boundary spoofing (/appSecret matching /app),
+ * and symlinks/NTFS junctions pointing outside the parent boundary.
  */
 export function isPathInside(parent: string, child: string): boolean {
   const resolvedParent = path.resolve(parent);
@@ -81,42 +120,95 @@ export function isPathInside(parent: string, child: string): boolean {
 
   if (pNorm === cNorm) return true;
 
+  // 1. Lexical boundary check
   const rel = path.relative(pNorm, cNorm);
-  return !rel.startsWith("..") && !path.isAbsolute(rel);
-}
-
-// ─── SSRF Private IP Detection ───────────────────────────────────────────────
-
-/**
- * Checks whether a hostname resolves to a private/internal IP range.
- * Blocks SSRF attacks targeting internal services (cloud metadata, localhost, etc.).
- */
-function isPrivateHostname(hostname: string): boolean {
-  const lower = hostname.toLowerCase();
-
-  // Obvious local hostnames
-  if (lower === "localhost" || lower === "0.0.0.0" || lower === "[::1]") return true;
-
-  // IPv6 loopback
-  if (lower === "::1") return true;
-
-  // IPv4 private ranges
-  const ipv4Match = lower.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4Match) {
-    const [, a, b] = ipv4Match.map(Number);
-    if (a === 127) return true;                          // 127.0.0.0/8
-    if (a === 10) return true;                           // 10.0.0.0/8
-    if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;              // 192.168.0.0/16
-    if (a === 169 && b === 254) return true;              // 169.254.0.0/16 (link-local / cloud metadata)
-    if (a === 0) return true;                            // 0.0.0.0/8
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return false;
   }
 
-  // IPv6 private ranges (simplified)
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;  // fc00::/7 (ULA)
-  if (lower.startsWith("fe80")) return true;                           // fe80::/10 (link-local)
+  // 2. Canonical symlink / junction resolution check
+  try {
+    const canonicalParent = canonicalizePath(parent);
+    const canonicalChild = canonicalizePath(child);
+
+    const cpNorm = isWindows ? canonicalParent.toLowerCase() : canonicalParent;
+    const ccNorm = isWindows ? canonicalChild.toLowerCase() : canonicalChild;
+
+    if (cpNorm === ccNorm) return true;
+
+    const canonicalRel = path.relative(cpNorm, ccNorm);
+    return !canonicalRel.startsWith("..") && !path.isAbsolute(canonicalRel);
+  } catch {
+    return false;
+  }
+}
+
+// ─── SSRF Private IP & DNS Detection ─────────────────────────────────────────
+
+/**
+ * Checks whether an IP address is in private, loopback, link-local, or cloud metadata ranges.
+ */
+export function isPrivateIp(ip: string): boolean {
+  const clean = ip.trim().toLowerCase();
+  if (clean === "localhost" || clean === "0.0.0.0" || clean === "::" || clean === "::1") return true;
+
+  // IPv4 check
+  const ipv4Match = clean.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [, a, b] = ipv4Match.map(Number);
+    if (a === 127) return true;                          // 127.0.0.0/8 (loopback)
+    if (a === 10) return true;                           // 10.0.0.0/8 (private)
+    if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12 (private)
+    if (a === 192 && b === 168) return true;              // 192.168.0.0/16 (private)
+    if (a === 169 && b === 254) return true;              // 169.254.0.0/16 (link-local / cloud metadata)
+    if (a === 0) return true;                            // 0.0.0.0/8
+    if (a >= 224) return true;                           // 224.0.0.0/4 (multicast / reserved)
+    return false;
+  }
+
+  // IPv6 check
+  if (clean.startsWith("::ffff:")) {
+    return isPrivateIp(clean.slice(7));
+  }
+  if (clean.startsWith("fc") || clean.startsWith("fd")) return true;  // fc00::/7 (ULA)
+  if (clean.startsWith("fe80")) return true;                           // fe80::/10 (link-local)
+  if (clean === "::1" || clean === "::") return true;
 
   return false;
+}
+
+/**
+ * Checks whether a hostname or literal IP is private.
+ */
+export function isPrivateHostname(hostname: string): boolean {
+  const clean = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (clean === "localhost" || clean === "0.0.0.0" || clean === "::1") return true;
+  if (clean.endsWith(".localhost") || clean.endsWith(".internal") || clean.endsWith(".local")) return true;
+  return isPrivateIp(clean);
+}
+
+/**
+ * Validates that all DNS resolved IP addresses for a given hostname are public addresses.
+ * Rejects hostnames resolving to private/internal IPs to prevent SSRF via DNS resolution.
+ */
+export async function validateHostIpSafety(hostname: string): Promise<boolean> {
+  const clean = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isPrivateHostname(clean)) return false;
+
+  try {
+    const addresses = await dns.promises.lookup(clean, { all: true });
+    if (!addresses || addresses.length === 0) {
+      return true;
+    }
+    for (const addr of addresses) {
+      if (isPrivateIp(addr.address)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 // ─── Permission Engine ───────────────────────────────────────────────────────
@@ -328,13 +420,13 @@ export class PermissionEngine {
 
     const { executable } = parseResult.command;
 
-    // Check cwd against filesystem policy if provided
-    if (input.cwd && this.policy.filesystem?.read) {
-      const cwdStr = String(input.cwd);
-      if (!this.isPathAllowed(cwdStr, this.policy.filesystem.read)) {
+    // Enforce cwd boundaries against filesystem policy
+    const effectiveCwd = input.cwd ? String(input.cwd) : process.cwd();
+    if (this.policy.filesystem?.read) {
+      if (!this.isPathAllowed(effectiveCwd, this.policy.filesystem.read)) {
         return {
           allowed: false,
-          reason: `Working directory (cwd) "${cwdStr}" is outside allowed filesystem boundaries`,
+          reason: `Working directory (cwd) "${effectiveCwd}" is outside allowed filesystem boundaries`,
         };
       }
     }
@@ -568,6 +660,16 @@ export class PermissionEngine {
     }
 
     return { allowed: true };
+  }
+
+  /** Public checker for HTTP URLs (used for redirect validation and standalone URL checks). */
+  checkHttpUrl(url: string): PermissionDecision {
+    return this.checkHttp({ url });
+  }
+
+  /** Public checker for Browser URLs (used for navigation and redirect checks). */
+  checkBrowserUrl(url: string): PermissionDecision {
+    return this.checkBrowser({ url });
   }
 }
 

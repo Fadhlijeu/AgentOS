@@ -194,7 +194,7 @@ async function main() {
       const address = server.address() as any;
       const baseUrl = `http://127.0.0.1:${address.port}`;
 
-      const tools = httpTools();
+      const tools = httpTools({ allowPrivateNetworks: true });
       const httpTool = tools.find((t) => t.name === "http_request")!;
       assert(Boolean(httpTool), "http_request tool must be registered");
 

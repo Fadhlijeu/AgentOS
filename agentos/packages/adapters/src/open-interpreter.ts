@@ -27,6 +27,63 @@ export const codeInterpreterSchema = z.object({
 export type CodeInterpreterInput = z.infer<typeof codeInterpreterSchema>;
 
 /**
+ * Allowlist of standard OS environment variable keys required for child process execution.
+ */
+const SAFE_ENV_KEYS = new Set([
+  "PATH",
+  "Path",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "SystemRoot",
+  "COMSPEC",
+  "ComSpec",
+  "WINDIR",
+  "windir",
+  "TEMP",
+  "TMP",
+  "USER",
+  "USERNAME",
+  "HOME",
+  "HOMEPATH",
+  "HOMEDRIVE",
+  "LANG",
+  "LC_ALL",
+  "SHELL",
+  "TERM",
+  "NODE_PATH",
+  "PYTHONPATH",
+]);
+
+/**
+ * Scrub sensitive environment variables (API keys, tokens, secrets, credentials)
+ * so untrusted code executed by agents cannot read host credentials from process.env.
+ */
+export function sanitizeProcessEnv(extraEnv: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {
+    PYTHONUNBUFFERED: "1",
+    NODE_ENV: "production",
+  };
+
+  const sensitivePattern = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE|DATABASE|URL|CONN_STR)/i;
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!value) continue;
+    if (sensitivePattern.test(key)) continue;
+    if (SAFE_ENV_KEYS.has(key) || key.startsWith("LC_") || key.startsWith("LANG")) {
+      sanitized[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (!sensitivePattern.test(key)) {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
+}
+
+/**
  * Executes code snippets in isolated subprocesses using the local system runtimes,
  * implementing the Open Interpreter code execution pattern.
  */
@@ -79,7 +136,7 @@ export class OpenInterpreterAdapter implements CodeInterpreterAdapter {
 
       const child = spawn(executable, args, {
         cwd: options?.cwd ?? process.cwd(),
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: sanitizeProcessEnv(),
         stdio: ["ignore", "pipe", "pipe"],
       });
 

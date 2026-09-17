@@ -52,9 +52,21 @@ const SENSITIVE_VALUE_PATTERNS = [
   /^Bearer\s+\S+/i,
   /^Basic\s+\S+/i,
   /^ghp_[A-Za-z0-9]+/,       // GitHub personal access token
-  /^sk-[A-Za-z0-9]+/,        // OpenAI API key
+  /^sk-[A-Za-z0-9_-]+/,      // OpenAI API key
   /^xoxb-[A-Za-z0-9-]+/,     // Slack bot token
   /^AIza[A-Za-z0-9_-]+/,     // Google API key
+];
+
+/**
+ * Patterns for inline scrubbing within string content (logs, tool results, HTTP responses).
+ */
+const INLINE_SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, replacement: "Bearer [REDACTED]" },
+  { pattern: /Basic\s+[A-Za-z0-9+/=]+/gi, replacement: "Basic [REDACTED]" },
+  { pattern: /sk-[A-Za-z0-9_-]{15,}/g, replacement: "[REDACTED_API_KEY]" },
+  { pattern: /ghp_[A-Za-z0-9]{20,}/g, replacement: "[REDACTED_TOKEN]" },
+  { pattern: /xoxb-[A-Za-z0-9-]+/g, replacement: "[REDACTED_TOKEN]" },
+  { pattern: /AIza[0-9A-Za-z-_]{35}/g, replacement: "[REDACTED_KEY]" },
 ];
 
 /**
@@ -85,7 +97,35 @@ function isSensitiveValue(value: string): boolean {
 }
 
 /**
- * Deep-clone and redact sensitive values from an object.
+ * Sanitize a string by checking for exact secret values, parsing JSON if applicable,
+ * or scrubbing embedded sensitive tokens.
+ */
+export function sanitizeString(value: string): string {
+  if (isSensitiveValue(value)) return REDACTED;
+
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const sanitized = redactSecrets(parsed);
+      return JSON.stringify(sanitized, null, 2);
+    } catch {
+      // Not valid JSON, proceed to inline regex replacement
+    }
+  }
+
+  let result = value;
+  for (const { pattern, replacement } of INLINE_SECRET_PATTERNS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+/**
+ * Deep-clone and redact sensitive values from an object or string.
  * Returns a new object — the original is never mutated.
  *
  * @param obj - The input object (typically tool arguments or event data)
@@ -95,8 +135,7 @@ export function redactSecrets<T>(obj: T): T {
   if (obj === null || obj === undefined) return obj;
 
   if (typeof obj === "string") {
-    if (isSensitiveValue(obj)) return REDACTED as unknown as T;
-    return obj;
+    return sanitizeString(obj) as unknown as T;
   }
 
   if (typeof obj !== "object") return obj;
@@ -109,8 +148,8 @@ export function redactSecrets<T>(obj: T): T {
   for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
     if (isSensitiveKey(key)) {
       result[key] = REDACTED;
-    } else if (typeof value === "string" && isSensitiveValue(value)) {
-      result[key] = REDACTED;
+    } else if (typeof value === "string") {
+      result[key] = isSensitiveValue(value) ? REDACTED : sanitizeString(value);
     } else if (typeof value === "object" && value !== null) {
       result[key] = redactSecrets(value);
     } else {

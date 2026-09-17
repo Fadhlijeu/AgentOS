@@ -7,7 +7,7 @@
     "build": "pnpm -r run build",
     "clean": "pnpm -r run clean",
     "typecheck": "tsc --noEmit && pnpm -r exec tsc --noEmit",
-    "test": "npx tsx agentos/tests/e2e-verification.ts && npx tsx agentos/tests/security-hardening.test.ts && npx tsx agentos/tests/lifecycle-concurrency.test.ts && npx tsx agentos/tests/memory-http-replay.test.ts && npx tsx agentos/tests/workspace-browser-runtime.test.ts && npx tsx agentos/tests/real-browser.test.ts && npx tsx agentos/tests/upstream-integrations.test.ts && npx tsx agentos/tests/e2e-real-browser-task.ts && npx tsx agentos/tests/audit-04-remediation.test.ts",
+    "test": "npx tsx agentos/tests/e2e-verification.ts && npx tsx agentos/tests/security-hardening.test.ts && npx tsx agentos/tests/lifecycle-concurrency.test.ts && npx tsx agentos/tests/memory-http-replay.test.ts && npx tsx agentos/tests/workspace-browser-runtime.test.ts && npx tsx agentos/tests/real-browser.test.ts && npx tsx agentos/tests/upstream-integrations.test.ts && npx tsx agentos/tests/e2e-real-browser-task.ts && npx tsx agentos/tests/audit-04-remediation.test.ts && npx tsx agentos/tests/audit-06-remediation.test.ts",
     "test:security": "npx tsx agentos/tests/security-hardening.test.ts",
     "test:lifecycle": "npx tsx agentos/tests/lifecycle-concurrency.test.ts",
     "test:phase3": "npx tsx agentos/tests/memory-http-replay.test.ts",
@@ -16,6 +16,7 @@
     "test:upstream": "npx tsx agentos/tests/upstream-integrations.test.ts",
     "test:e2e-browser": "npx tsx agentos/tests/e2e-real-browser-task.ts",
     "test:remediation": "npx tsx agentos/tests/audit-04-remediation.test.ts",
+    "test:audit06": "npx tsx agentos/tests/audit-06-remediation.test.ts",
     "example:basic": "npx tsx agentos/examples/basic-agent.ts",
     "example:filesystem": "npx tsx agentos/examples/filesystem-agent.ts",
     "playground": "npx tsx agentos/apps/playground/src/index.ts"

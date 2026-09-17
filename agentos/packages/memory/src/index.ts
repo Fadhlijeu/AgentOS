@@ -18,6 +18,12 @@ export interface MemoryEntry {
   expiresAt?: number;
 }
 
+export interface RetrieveOptions {
+  limit?: number;
+  runId?: string;
+  includeWorking?: boolean;
+}
+
 /**
  * Pluggable storage backend for memory entries.
  * Implement this to back memory with SQLite, Redis, filesystem, etc.
@@ -280,23 +286,57 @@ export class MemoryManager {
 
   /**
    * Retrieve memories relevant to a given task or query string.
-   * Searches across long-term and semantic tiers.
+   * By default searches across "long-term" and "semantic" tiers only.
+   * Working memory from other runs is strictly isolated and never returned.
    */
-  async retrieve(query: string, limit: number = 5): Promise<MemoryEntry[]> {
-    if (this.store.search) {
-      return this.store.search(query, undefined, limit);
-    }
+  async retrieve(
+    query: string,
+    limitOrOptions: number | RetrieveOptions = 5
+  ): Promise<MemoryEntry[]> {
+    const options: RetrieveOptions =
+      typeof limitOrOptions === "number"
+        ? { limit: limitOrOptions }
+        : limitOrOptions;
+    const limit = options.limit ?? 5;
+    const currentRunId = options.runId;
+    const includeWorking = options.includeWorking ?? false;
 
-    // Fallback: search long-term memory entries
-    const entries = await this.getAllLongTerm();
-    const q = query.toLowerCase();
-    return entries
-      .filter((e) => {
+    let entries: MemoryEntry[] = [];
+
+    if (this.store.search) {
+      // Search only durable long-term and semantic tiers
+      const longTerm = await this.store.search(query, "long-term", limit);
+      const semantic = await this.store.search(query, "semantic", limit);
+      entries = [...longTerm, ...semantic];
+
+      if (includeWorking && currentRunId) {
+        const working = await this.store.search(query, "working", limit);
+        const scopedWorking = working.filter((e) =>
+          e.key.startsWith(`working:${currentRunId}:`)
+        );
+        entries.push(...scopedWorking);
+      }
+    } else {
+      // Fallback: search long-term memory entries
+      const allLongTerm = await this.getAllLongTerm();
+      const q = query.toLowerCase();
+      entries = allLongTerm.filter((e) => {
         if (e.key.toLowerCase().includes(q)) return true;
         if (e.tags?.some((t) => t.toLowerCase().includes(q))) return true;
         const valStr =
           typeof e.value === "string" ? e.value : JSON.stringify(e.value);
         return valStr.toLowerCase().includes(q);
+      });
+    }
+
+    // P1-5: Security filter — ensure NO other run's working memory ever leaks
+    return entries
+      .filter((e) => {
+        if (e.tier === "working") {
+          if (!includeWorking || !currentRunId) return false;
+          return e.key.startsWith(`working:${currentRunId}:`);
+        }
+        return true;
       })
       .slice(0, limit);
   }

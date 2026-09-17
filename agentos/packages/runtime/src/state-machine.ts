@@ -21,7 +21,7 @@ export class IllegalStateTransitionError extends Error {
 }
 
 const TRANSITIONS: Record<AgentStatus, readonly AgentStatus[]> = {
-  IDLE: ["RUNNING"],
+  IDLE: ["RUNNING", "CANCELLED"],
   RUNNING: ["PAUSED", "COMPLETED", "ERROR", "CANCELLED"],
   PAUSED: ["RUNNING", "CANCELLED"],
   COMPLETED: [],

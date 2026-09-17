@@ -143,7 +143,7 @@ export class RunContext implements AgentRun {
   }
 
   async cancel(): Promise<void> {
-    if (this.stateMachine.status === "PAUSED" || this.stateMachine.status === "RUNNING") {
+    if (!this.stateMachine.isTerminal()) {
       this.stateMachine.transitionTo("CANCELLED");
       this.abortController.abort();
       // Wake up any paused loops so they terminate cleanly

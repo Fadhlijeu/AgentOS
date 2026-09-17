@@ -22,22 +22,22 @@ To ensure complete architectural honesty (per `audit_0.2.md` guidelines), every 
 | **Model Abstraction** | `Implemented` | `OpenAIProvider`, `MockModelProvider`, multi-tool schema definitions |
 | **Permission Engine** | `Implemented` | Deny-by-default filesystem security, path canonicalization (`isPathInside`), AST command parser (`parseCommand`), exact-origin matching, SSRF protection |
 | **Human Approval** | `Implemented` | Risk-level gating (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), interactive console & custom UI handlers with `AbortSignal` |
-| **Secret Redaction** | `Implemented` | Automatic redaction of sensitive headers, API keys, passwords, and tokens before event emission and persistence |
-| **Per-Run Lifecycle & State Machine**| `Implemented` | `RunStateMachine`, per-run `RunContext` with real `AbortSignal` cancellation and concurrent run isolation |
+| **Secret Redaction** | `Implemented` | Automatic redaction of sensitive headers, API keys, passwords, and tokens before event emission, approval UI, traces, and SQLite storage |
+| **Per-Run Lifecycle & State Machine**| `Implemented` | `RunStateMachine`, per-run `RunContext` with real `AbortSignal` cancellation, typed `task.cancelled` events, and concurrent run isolation |
 | **Event Bus** | `Implemented` | High-throughput typed `EventBus` with wildcard matching and traceable events (`runId`, `taskId`) |
-| **Durable Tiered Memory** | `Implemented` | SQLite-backed per-run `working`, `long-term`, and lexical keyword-scored memory retrieval (vector embeddings planned) |
-| **SQLite Persistence** | `Implemented` | WAL-mode SQLite storage for `runs`, `events`, `state`, `tool_calls`, and `memory_entries` with fail-fast policies |
-| **Observability & Tracing** | `Implemented` | Structured latency spans, token metrics, and exportable JSON execution traces |
-| **Workspace Runtime Jailing** | `Implemented` | `LocalWorkspace` and `InMemoryWorkspace` enforcing boundary-aware traversal prevention |
-| **HTTP / API Tool** | `Implemented` | `http_request` with Zod validation, cancellation support, SSRF defense, and origin allow/deny lists |
-| **Real Browser Automation** | `AgentOS Native` | `PlaywrightBrowserProvider` driving real Chrome/Edge engines (inspired by Browser Use & Open Browser Use patterns) |
-| **Code Interpreter Execution** | `AgentOS Native` | Subprocess execution running Python/Node/Shell with strict command validation (inspired by Open Interpreter) |
-| **OpenHands Compatibility Adapter** | `Compatible Adapter` | `OpenHandsWorkspaceAdapter` and `OpenHandsEventMapper` translating actions & observations |
+| **Durable Tiered Memory** | `Implemented` | SQLite-backed per-run `working`, `long-term`, and cross-run isolated lexical keyword-scored memory retrieval (vector embeddings planned) |
+| **SQLite Persistence** | `Implemented` | WAL-mode SQLite storage for `runs`, `events`, `state`, `tool_calls`, and `memory_entries` with fail-fast `persistenceMode: "required"` |
+| **Observability & Tracing** | `Implemented` | Structured latency spans, token metrics, sanitized trace records, and exportable JSON execution traces |
+| **Workspace Runtime Jailing** | `Implemented` | `LocalWorkspace` and `InMemoryWorkspace` enforcing symlink/junction-safe canonical `realpath` traversal prevention |
+| **HTTP / API Tool** | `Implemented` | `http_request` with Zod validation, cancellation support, manual redirect hop validation, and SSRF DNS pre-resolution defense |
+| **Real Browser Automation** | `AgentOS Native` | `PlaywrightBrowserProvider` driving real Chrome/Edge engines with in-flight `AbortSignal` cancellation |
+| **Code Interpreter Execution** | `AgentOS Native` | Subprocess execution running Python/Node/Shell with host environment sanitization and approval gating |
+| **OpenHands Compatibility Adapter** | `Compatible Adapter` | `OpenHandsWorkspaceAdapter` and `OpenHandsEventMapper` translating actions & observations with realpath safety |
 | **Audit Timeline Reconstruction** | `Implemented` | `agent.reconstructTimeline(runId)` reconstructing runs, events, and tool logs from SQLite |
 | **Deterministic Simulation Re-Execution** | `Experimental` | Re-running reasoning loop against recorded mock responses |
 | **OS-Level Container Sandboxing** | `Planned` | Docker / Firecracker microVM execution for untrusted host commands |
 | **Control Plane Scheduler & Queue** | `Planned` | Persistent recurring cron jobs and background worker task queue |
-| **Desktop GUI Application** | `Experimental` | Preview CLI and developer desktop playground under `agentos/apps/` |
+| **Desktop GUI Application** | `Planned` | Desktop shell placeholder under `agentos/apps/desktop` (planned for v0.2) |
 
 ---
 
@@ -125,7 +125,7 @@ const result = await agent.run(
 );
 
 console.log("Agent result:\n", result.output);
-agent.dispose();
+await agent.dispose();
 ```
 
 ---

@@ -5,6 +5,7 @@
 import * as readline from "readline";
 import type { RiskLevel, ApprovalStatus } from "@agentos/core";
 import { EventBus } from "@agentos/events";
+import { redactSecrets } from "./redactor";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -60,17 +61,20 @@ export class ApprovalManager {
     signal?: AbortSignal
   ): Promise<boolean> {
     const requestId = `approval_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    // P0: Always sanitize sensitive secrets (API keys, Authorization headers)
+    // before displaying in approval UI or emitting in approval events.
+    const sanitizedInput = redactSecrets(input) as Record<string, unknown>;
     const request: ApprovalRequest = {
       requestId,
       toolName,
       riskLevel,
-      input,
+      input: sanitizedInput,
       description: `Tool "${toolName}" (risk: ${riskLevel})`,
     };
 
     this.pending.set(requestId, request);
 
-    // Emit approval.required event
+    // Emit approval.required event with sanitized input copy
     this.eventBus.emit("approval.required", {
       runId,
       taskId,
@@ -78,7 +82,7 @@ export class ApprovalManager {
         requestId,
         toolName,
         riskLevel,
-        input,
+        input: sanitizedInput,
       },
     });
 

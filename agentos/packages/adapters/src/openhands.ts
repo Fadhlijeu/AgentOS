@@ -29,10 +29,11 @@ export class OpenHandsWorkspaceAdapter implements WorkspaceAdapter {
   }
 
   constructor(rootDir: string) {
-    this.rootPath = path.resolve(rootDir);
-    if (!fs.existsSync(this.rootPath)) {
-      fs.mkdirSync(this.rootPath, { recursive: true });
+    const rawRoot = path.resolve(rootDir);
+    if (!fs.existsSync(rawRoot)) {
+      fs.mkdirSync(rawRoot, { recursive: true });
     }
+    this.rootPath = fs.existsSync(rawRoot) ? fs.realpathSync(rawRoot) : rawRoot;
   }
 
   resolvePath(relPath: string): string {
@@ -59,6 +60,14 @@ export class OpenHandsWorkspaceAdapter implements WorkspaceAdapter {
 
   async write(relativePath: string, content: string): Promise<void> {
     const full = this.resolvePath(relativePath);
+    if (fs.existsSync(full)) {
+      const realTarget = fs.realpathSync(full);
+      if (!isPathInside(this.rootPath, realTarget)) {
+        throw new OpenHandsWorkspaceError(
+          `Path traversal denied by OpenHands boundary: "${relativePath}" resolves outside root "${this.rootPath}"`
+        );
+      }
+    }
     const parent = path.dirname(full);
     if (!fs.existsSync(parent)) {
       await fs.promises.mkdir(parent, { recursive: true });

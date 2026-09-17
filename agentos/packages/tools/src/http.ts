@@ -3,6 +3,7 @@
 // external services with timeout enforcement, AbortSignal propagation, and Zod validation.
 
 import { z } from "zod";
+import { validateHostIpSafety } from "@agentos/permissions";
 import type { Tool, ToolContext } from "./index";
 
 export const httpRequestSchema = z.object({
@@ -18,7 +19,11 @@ export const httpRequestSchema = z.object({
 
 export type HttpRequestInput = z.infer<typeof httpRequestSchema>;
 
-function httpRequest(): Tool {
+export interface HttpToolOptions {
+  allowPrivateNetworks?: boolean;
+}
+
+function httpRequest(options?: HttpToolOptions): Tool {
   return {
     name: "http_request",
     description:
@@ -105,12 +110,72 @@ function httpRequest(): Tool {
           }
         }
 
-        const response = await fetch(url, {
-          method,
-          headers: reqHeaders,
-          body: method === "GET" || method === "HEAD" ? undefined : reqBody,
-          signal: controller.signal,
-        });
+        // P0-3: Manual redirect handling with SSRF & DNS safety validation at each hop
+        let currentUrl = url;
+        let currentMethod = method;
+        let currentBody = method === "GET" || method === "HEAD" ? undefined : reqBody;
+        let response: Response;
+        let redirectCount = 0;
+        const MAX_REDIRECTS = 5;
+
+        const allowPrivate = options?.allowPrivateNetworks || process.env.AGENTOS_ALLOW_PRIVATE_NETWORKS === "true";
+        while (true) {
+          const parsedTarget = new URL(currentUrl);
+          if (!allowPrivate) {
+            const isSafe = await validateHostIpSafety(parsedTarget.hostname);
+            if (!isSafe) {
+              throw new Error(
+                `SSRF protection: HTTP request to internal/private IP address "${parsedTarget.hostname}" is blocked.`
+              );
+            }
+          }
+
+          response = await fetch(currentUrl, {
+            method: currentMethod,
+            headers: reqHeaders,
+            body: currentBody,
+            signal: controller.signal,
+            redirect: "manual",
+          });
+
+          // Check for HTTP redirect status codes (301, 302, 303, 307, 308)
+          if ([301, 302, 303, 307, 308].includes(response.status)) {
+            const location = response.headers.get("location");
+            if (!location) {
+              break;
+            }
+
+            redirectCount++;
+            if (redirectCount > MAX_REDIRECTS) {
+              throw new Error(`Too many redirects (exceeded limit of ${MAX_REDIRECTS})`);
+            }
+
+            const nextUrl = new URL(location, currentUrl).href;
+            const nextParsed = new URL(nextUrl);
+
+            if (nextParsed.protocol !== "http:" && nextParsed.protocol !== "https:") {
+              throw new Error(`SSRF protection: Redirect to forbidden protocol "${nextParsed.protocol}" blocked.`);
+            }
+
+            if (!allowPrivate) {
+              const nextSafe = await validateHostIpSafety(nextParsed.hostname);
+              if (!nextSafe) {
+                throw new Error(
+                  `SSRF protection: Redirect to internal/private address "${nextParsed.hostname}" is blocked.`
+                );
+              }
+            }
+
+            currentUrl = nextUrl;
+            if (response.status === 303) {
+              currentMethod = "GET";
+              currentBody = undefined;
+            }
+            continue;
+          }
+
+          break;
+        }
 
         clearTimeout(timer);
         if (ctx.signal) {
@@ -134,7 +199,7 @@ function httpRequest(): Tool {
         // Format result
         const parts: string[] = [
           `HTTP ${response.status} ${response.statusText}`,
-          `URL: ${url}`,
+          `URL: ${currentUrl}`,
         ];
 
         if (responseBody.trim()) {
@@ -169,6 +234,6 @@ function httpRequest(): Tool {
   };
 }
 
-export function httpTools(): Tool[] {
-  return [httpRequest()];
+export function httpTools(options?: HttpToolOptions): Tool[] {
+  return [httpRequest(options)];
 }

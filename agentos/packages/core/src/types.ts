@@ -27,6 +27,7 @@ export type AgentEventType =
   | "task.started"
   | "task.completed"
   | "task.failed"
+  | "task.cancelled"
   | "plan.created"
   | "plan.step"
   | "tool.requested"
@@ -36,7 +37,8 @@ export type AgentEventType =
   | "approval.required"
   | "approval.granted"
   | "approval.denied"
-  | "memory.updated";
+  | "memory.updated"
+  | "persistence.error";
 
 // ─── Event Payload ───────────────────────────────────────────────────────────
 
@@ -112,12 +114,12 @@ export interface WorkspaceAdapter {
 
 export interface BrowserSession {
   readonly sessionId: string;
-  navigate(url: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  type(selector: string, text: string): Promise<void>;
-  screenshot(): Promise<Buffer | Uint8Array>;
-  evaluate<T>(script: string): Promise<T>;
-  observe?(): Promise<{
+  navigate(url: string, options?: { signal?: AbortSignal }): Promise<void>;
+  click(selector: string, options?: { signal?: AbortSignal }): Promise<void>;
+  type(selector: string, text: string, options?: { signal?: AbortSignal }): Promise<void>;
+  screenshot(options?: { signal?: AbortSignal }): Promise<Buffer | Uint8Array>;
+  evaluate<T>(script: string, options?: { signal?: AbortSignal }): Promise<T>;
+  observe?(options?: { signal?: AbortSignal }): Promise<{
     url: string;
     title: string;
     content: string;

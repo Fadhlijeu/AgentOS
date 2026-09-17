@@ -39,7 +39,8 @@ class BuiltinBrowserSession implements BrowserSession {
   private elements = new Map<string, { selector: string; tag: string; text?: string; value?: string; href?: string }>();
   private closed = false;
 
-  async navigate(url: string): Promise<void> {
+  async navigate(url: string, options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) throw new Error("Cancelled");
     this.url = url;
     try {
       const parsed = new URL(url);
@@ -55,17 +56,19 @@ class BuiltinBrowserSession implements BrowserSession {
     }
   }
 
-  async click(selector: string): Promise<void> {
+  async click(selector: string, options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) throw new Error("Cancelled");
     const el = this.elements.get(selector);
     if (!el) {
       throw new Error(`Element with selector "${selector}" not found on page "${this.url}"`);
     }
     if (el.tag === "a" && el.href) {
-      await this.navigate(el.href);
+      await this.navigate(el.href, options);
     }
   }
 
-  async type(selector: string, text: string): Promise<void> {
+  async type(selector: string, text: string, options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) throw new Error("Cancelled");
     const el = this.elements.get(selector);
     if (!el) {
       this.elements.set(selector, { selector, tag: "input", value: text });
@@ -74,20 +77,23 @@ class BuiltinBrowserSession implements BrowserSession {
     }
   }
 
-  async screenshot(): Promise<Buffer> {
+  async screenshot(options?: { signal?: AbortSignal }): Promise<Buffer> {
+    if (options?.signal?.aborted) throw new Error("Cancelled");
     const pngHex =
       "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082";
     return Buffer.from(pngHex, "hex");
   }
 
-  async evaluate<T>(script: string): Promise<T> {
+  async evaluate<T>(script: string, options?: { signal?: AbortSignal }): Promise<T> {
+    if (options?.signal?.aborted) throw new Error("Cancelled");
     if (script === "document.title") return this.title as unknown as T;
     if (script === "window.location.href") return this.url as unknown as T;
     if (script === "document.body.innerText") return this.content as unknown as T;
     return null as unknown as T;
   }
 
-  async observe() {
+  async observe(options?: { signal?: AbortSignal }) {
+    if (options?.signal?.aborted) throw new Error("Cancelled");
     return {
       url: this.url,
       title: this.title,
@@ -144,10 +150,10 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       const session = await getSession();
 
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
-      await session.navigate(url);
+      await session.navigate(url, { signal: ctx?.signal });
 
-      const title = await session.evaluate<string>("document.title").catch(() => "Unknown");
-      const content = await session.evaluate<string>("document.body.innerText").catch(() => "");
+      const title = await session.evaluate<string>("document.title", { signal: ctx?.signal }).catch(() => "Unknown");
+      const content = await session.evaluate<string>("document.body.innerText", { signal: ctx?.signal }).catch(() => "");
 
       const preview = content.length > 500 ? content.slice(0, 500) + "..." : content;
 
@@ -177,9 +183,9 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       const session = await getSession();
 
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
-      await session.click(selector);
-      const title = await session.evaluate<string>("document.title").catch(() => "");
-      const url = await session.evaluate<string>("window.location.href").catch(() => "");
+      await session.click(selector, { signal: ctx?.signal });
+      const title = await session.evaluate<string>("document.title", { signal: ctx?.signal }).catch(() => "");
+      const url = await session.evaluate<string>("window.location.href", { signal: ctx?.signal }).catch(() => "");
 
       return `Clicked "${selector}". Current URL: ${url}${title ? ` (Title: "${title}")` : ""}`;
     },
@@ -211,7 +217,7 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       const session = await getSession();
 
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
-      await session.type(selector, text);
+      await session.type(selector, text, { signal: ctx?.signal });
       return `Typed "${text}" into "${selector}".`;
     },
   };
@@ -230,7 +236,7 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const session = await getSession();
       if (session.observe) {
-        const obs = await session.observe();
+        const obs = await session.observe({ signal: ctx?.signal });
         const elementSummary = obs.elements
           .map((el) => `  - [${el.tag}] ${el.selector}${el.text ? ` text="${el.text}"` : ""}${el.value ? ` value="${el.value}"` : ""}${el.href ? ` href="${el.href}"` : ""}`)
           .join("\n");
@@ -243,8 +249,8 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
         ].join("\n");
       }
 
-      const url = await session.evaluate<string>("window.location.href").catch(() => "unknown");
-      const title = await session.evaluate<string>("document.title").catch(() => "unknown");
+      const url = await session.evaluate<string>("window.location.href", { signal: ctx?.signal }).catch(() => "unknown");
+      const title = await session.evaluate<string>("document.title", { signal: ctx?.signal }).catch(() => "unknown");
       return `Current URL: ${url}\nPage Title: ${title}`;
     },
   };
@@ -262,7 +268,7 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
     execute: async (_input, ctx) => {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const session = await getSession();
-      const buffer = await session.screenshot();
+      const buffer = await session.screenshot({ signal: ctx?.signal });
       const base64 = Buffer.from(buffer).toString("base64");
       return `Screenshot captured (${buffer.byteLength} bytes). Base64 snippet: ${base64.slice(0, 80)}...`;
     },
