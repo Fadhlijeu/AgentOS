@@ -94,7 +94,7 @@ async function main() {
     // ─────────────────────────────────────────────────────────────────────────
     // Test 2: Automated Context Retrieval & Prompt Assembly
     // ─────────────────────────────────────────────────────────────────────────
-    await runTest("Agent retrieves relevant memories and injects them into system context", async () => {
+    await runTest("Agent retrieves relevant memories and injects them into untrusted user context", async () => {
       const dbFile = path.join(tempDir, "agent_context_retrieval.db");
       const mock = new MockModelProvider();
       mock.addAnswer("Final response after reading context.");
@@ -117,15 +117,19 @@ async function main() {
       assert(requests.length > 0, "Model should have received at least 1 request");
 
       const initialMessages = requests[0].messages;
-      const systemMessage = initialMessages.find((m) => m.role === "system");
-      assert(Boolean(systemMessage), "A system message must be generated");
+      const userMessage = initialMessages.find((m) => m.role === "user");
+      assert(Boolean(userMessage), "A user message must be generated");
       assert(
-        systemMessage?.content?.includes("Relevant Past Knowledge") ?? false,
-        "System prompt must contain Retrieved Past Knowledge header"
+        userMessage?.content?.includes("Relevant Past Knowledge") ?? false,
+        "User message must contain Retrieved Past Knowledge header"
       );
       assert(
-        systemMessage?.content?.includes("db_server_port") ?? false,
-        "System prompt must include retrieved memory key db_server_port"
+        userMessage?.content?.includes("db_server_port") ?? false,
+        "User message must include retrieved memory key db_server_port"
+      );
+      assert(
+        userMessage?.content?.includes("<untrusted_memory_context>") ?? false,
+        "Retrieved memory must be safely delimited inside <untrusted_memory_context>"
       );
 
       agent.dispose();

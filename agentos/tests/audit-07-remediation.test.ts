@@ -1,4 +1,4 @@
-// ─── AgentOS — Audit 0.6 Remediation Verification Suite ─────────────────────
+// ─── AgentOS — Audit 0.7 Remediation Verification Suite ─────────────────────
 //
 // Formally verifies all P0 (Security) and P1 (Run/Workspace Isolation,
 // Lifecycle, Observability Privacy, Packaging) remediations from audit_0.6.md:
@@ -58,7 +58,7 @@ function assert(condition: boolean, msg: string): void {
 }
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
-  process.stdout.write(`  🛡️ [Audit 0.6] ${name} ... `);
+  process.stdout.write(`  🛡️ [Audit 0.7] ${name} ... `);
   try {
     await fn();
     console.log("✅ PASS");
@@ -72,7 +72,7 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 
 async function main(): Promise<void> {
   console.log("\n╔══════════════════════════════════════════════════════════╗");
-  console.log("║     🛡️ AgentOS — Audit 0.6 Remediation Test Suite        ║");
+  console.log("║     🛡️ AgentOS — Audit 0.7 Remediation Test Suite        ║");
   console.log("╚══════════════════════════════════════════════════════════╝\n");
 
   const testBaseDir = path.join(os.tmpdir(), `audit06_test_${Date.now()}`);
@@ -644,7 +644,7 @@ async function main(): Promise<void> {
   }
 
   console.log("\n════════════════════════════════════════════════════════════");
-  console.log(`AUDIT 0.6 REMEDIATION RESULT: ${passed} passed, ${failed} failed`);
+  console.log(`AUDIT 0.7 REMEDIATION RESULT: ${passed} passed, ${failed} failed`);
   console.log("════════════════════════════════════════════════════════════\n");
 
   if (failed > 0) {

@@ -12,6 +12,15 @@ export type WildcardHandler = (event: AgentEvent) => void;
 
 // ─── EventBus ────────────────────────────────────────────────────────────────
 
+export interface EventBusOptions {
+  /**
+   * If true, errors thrown by event handlers during emit() will NOT be swallowed,
+   * but re-thrown immediately. Essential for persistenceMode: "required" fail-fast durability.
+   * Default: false.
+   */
+  propagateErrors?: boolean;
+}
+
 /**
  * Central event bus for all AgentOS events.
  *
@@ -20,6 +29,7 @@ export type WildcardHandler = (event: AgentEvent) => void;
  * - One-time listeners with `once(type)`
  * - Wildcard listeners with `onAny(handler)`
  * - Full event history for replay / observability
+ * - Optional strict error propagation (`propagateErrors: true`) for persistence durability
  *
  * ```ts
  * const bus = new EventBus();
@@ -31,6 +41,18 @@ export class EventBus {
   private listeners = new Map<string, Set<EventHandler>>();
   private wildcardListeners = new Set<WildcardHandler>();
   private history: AgentEvent[] = [];
+  private propagateErrors: boolean = false;
+
+  constructor(options?: EventBusOptions) {
+    if (options?.propagateErrors) {
+      this.propagateErrors = true;
+    }
+  }
+
+  /** Enable or disable immediate re-throwing of listener errors. */
+  setPropagateErrors(propagate: boolean): void {
+    this.propagateErrors = propagate;
+  }
 
   // ── Subscribe ──────────────────────────────────────────────────────────
 
@@ -73,6 +95,7 @@ export class EventBus {
   /**
    * Emit an event. The event is enriched with a unique `id` and `timestamp`,
    * stored in history, then dispatched to all matching listeners.
+   * In strict mode (`propagateErrors: true`), handler errors are re-thrown immediately.
    */
   emit(
     type: AgentEventType,
@@ -96,6 +119,7 @@ export class EventBus {
         try {
           handler(event);
         } catch (err) {
+          if (this.propagateErrors) throw err;
           console.error(`[EventBus] Handler error for "${type}":`, err);
         }
       }
@@ -106,6 +130,7 @@ export class EventBus {
       try {
         handler(event);
       } catch (err) {
+        if (this.propagateErrors) throw err;
         console.error(`[EventBus] Wildcard handler error:`, err);
       }
     }

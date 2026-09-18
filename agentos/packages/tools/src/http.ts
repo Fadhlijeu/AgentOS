@@ -114,6 +114,7 @@ function httpRequest(options?: HttpToolOptions): Tool {
         let currentUrl = url;
         let currentMethod = method;
         let currentBody = method === "GET" || method === "HEAD" ? undefined : reqBody;
+        let currentHeaders: Record<string, string> = { ...reqHeaders };
         let response: Response;
         let redirectCount = 0;
         const MAX_REDIRECTS = 5;
@@ -132,7 +133,7 @@ function httpRequest(options?: HttpToolOptions): Tool {
 
           response = await fetch(currentUrl, {
             method: currentMethod,
-            headers: reqHeaders,
+            headers: currentHeaders,
             body: currentBody,
             signal: controller.signal,
             redirect: "manual",
@@ -166,11 +167,44 @@ function httpRequest(options?: HttpToolOptions): Tool {
               }
             }
 
-            currentUrl = nextUrl;
-            if (response.status === 303) {
+            // P0-Audit08: Cross-origin credential & sensitive header stripping
+            const currentParsed = new URL(currentUrl);
+            const isCrossOrigin = currentParsed.origin.toLowerCase() !== nextParsed.origin.toLowerCase();
+            if (isCrossOrigin) {
+              const sensitiveHeaders = [
+                "authorization",
+                "cookie",
+                "proxy-authorization",
+                "x-api-key",
+              ];
+              const safeHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(currentHeaders)) {
+                if (!sensitiveHeaders.includes(k.toLowerCase())) {
+                  safeHeaders[k] = v;
+                }
+              }
+              currentHeaders = safeHeaders;
+            }
+
+            // P0-Audit08: Standard redirect method transformation & body dropping
+            // 303: Always convert to GET and drop body
+            // 301/302: When originating from POST, convert to GET and drop body
+            if (
+              response.status === 303 ||
+              ((response.status === 301 || response.status === 302) && currentMethod === "POST")
+            ) {
               currentMethod = "GET";
               currentBody = undefined;
+              const nonContentHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(currentHeaders)) {
+                if (k.toLowerCase() !== "content-type" && k.toLowerCase() !== "content-length") {
+                  nonContentHeaders[k] = v;
+                }
+              }
+              currentHeaders = nonContentHeaders;
             }
+
+            currentUrl = nextUrl;
             continue;
           }
 

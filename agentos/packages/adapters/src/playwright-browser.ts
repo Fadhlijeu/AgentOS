@@ -8,6 +8,12 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { generateId } from "@agentos/core";
 import type { BrowserSession, BrowserProviderAdapter } from "./index";
 
+export type NavigationValidator = (url: string) => Promise<boolean> | boolean;
+
+export interface PlaywrightSessionOptions {
+  navigationValidator?: NavigationValidator;
+}
+
 export interface PlaywrightBrowserOptions {
   headless?: boolean;
   channel?: "chrome" | "msedge" | "chromium";
@@ -21,6 +27,10 @@ export interface PlaywrightBrowserOptions {
    * Auto-detected from CI/DOCKER/KUBERNETES_SERVICE_HOST env vars if not set.
    */
   sandbox?: boolean;
+  /**
+   * Optional async or sync validator for all navigations (goto, links, redirects).
+   */
+  navigationValidator?: NavigationValidator;
 }
 
 /**
@@ -94,17 +104,56 @@ export class PlaywrightBrowserSession implements BrowserSession {
   private closed: boolean = false;
   private url: string = "about:blank";
   private title: string = "";
+  private navigationValidator?: NavigationValidator;
+  private routeInitialized: boolean = false;
 
   constructor(
     sessionId: string,
     browser: Browser,
     context: BrowserContext,
-    page: Page
+    page: Page,
+    options?: PlaywrightSessionOptions
   ) {
     this.sessionId = sessionId;
     this.browser = browser;
     this.context = context;
     this.page = page;
+    this.navigationValidator = options?.navigationValidator;
+  }
+
+  /**
+   * Initializes network route policy interception on the browser page.
+   * Intercepts goto, link clicks, redirects, and JS navigations.
+   */
+  async init(): Promise<void> {
+    if (this.routeInitialized) return;
+    this.routeInitialized = true;
+
+    if (this.navigationValidator) {
+      await this.page.route("**/*", async (route) => {
+        const req = route.request();
+        if (req.isNavigationRequest()) {
+          const targetUrl = req.url();
+          try {
+            const allowed = await this.navigationValidator!(targetUrl);
+            if (!allowed) {
+              await route.abort("blockedbyclient");
+              return;
+            }
+          } catch {
+            await route.abort("blockedbyclient");
+            return;
+          }
+        }
+        await route.continue();
+      });
+    }
+  }
+
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new Error(`BrowserSession ${this.sessionId} has been closed`);
+    }
   }
 
   get currentUrl(): string {
@@ -126,14 +175,30 @@ export class PlaywrightBrowserSession implements BrowserSession {
   async navigate(url: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
     if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    await this.init();
 
-    await withAbort(
-      this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
-      options?.signal,
-      () => {
-        this.page.evaluate(() => window.stop()).catch(() => {});
+    if (this.navigationValidator) {
+      const allowed = await this.navigationValidator(url);
+      if (!allowed) {
+        throw new Error(`Navigation blocked by security policy: destination URL "${url}" is restricted.`);
       }
-    );
+    }
+
+    try {
+      await withAbort(
+        this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
+        options?.signal,
+        () => {
+          this.page.evaluate(() => window.stop()).catch(() => {});
+        }
+      );
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes("blockedbyclient") || msg.includes("ERR_BLOCKED_BY_CLIENT") || msg.includes("restricted")) {
+        throw new Error(`Navigation blocked by security policy: destination URL "${url}" is restricted.`);
+      }
+      throw err;
+    }
     this.url = this.page.url();
     this.title = await this.page.title();
   }
@@ -141,8 +206,18 @@ export class PlaywrightBrowserSession implements BrowserSession {
   async click(selector: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
     if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    await this.init();
+
     const locator = this.page.locator(selector).first();
-    await withAbort(locator.click({ timeout: 15000 }), options?.signal);
+    try {
+      await withAbort(locator.click({ timeout: 15000 }), options?.signal);
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes("blockedbyclient") || msg.includes("ERR_BLOCKED_BY_CLIENT")) {
+        throw new Error(`Navigation blocked by security policy: clicked element triggered navigation to a restricted destination.`);
+      }
+      throw err;
+    }
     // Update state after potential navigation or mutation
     this.url = this.page.url();
     this.title = await this.page.title();
@@ -158,7 +233,11 @@ export class PlaywrightBrowserSession implements BrowserSession {
   async evaluate<T>(script: string, options?: { signal?: AbortSignal }): Promise<T> {
     this.assertOpen();
     if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
-    return withAbort(this.page.evaluate<T>(script), options?.signal);
+    const result = await withAbort(
+      this.page.evaluate(script),
+      options?.signal
+    );
+    return result as T;
   }
 
   async observe(options?: { signal?: AbortSignal }): Promise<{
@@ -188,41 +267,101 @@ export class PlaywrightBrowserSession implements BrowserSession {
     this.url = this.page.url();
     this.title = await this.page.title();
 
-    // Extract interactive DOM elements from the real page with abort awareness
-    const observation = await withAbort(
-      this.page.evaluate(() => {
-        const interactiveNodes = Array.from(
-          document.querySelectorAll<HTMLElement>(
-            'button, a[href], input, select, textarea, [role="button"], [onclick]'
-          )
-        );
+    // Extract interactive DOM elements from the real page with robust, scoped selectors
+    // Passed as evaluated string script to avoid esbuild/tsx __name reference errors in browser
+    const extractScript = `(() => {
+      function getSafeCssEscape(val) {
+        if (typeof CSS !== "undefined" && CSS.escape) {
+          return CSS.escape(val);
+        }
+        return val.replace(/([ #;?%&,.+*~\\':"!^$[\\]()=>|\\/@])/g, "\\\\$1");
+      }
 
-        const elements = interactiveNodes.slice(0, 50).map((el, index) => {
-          let selector = "";
-          if (el.id) {
-            selector = `#${el.id}`;
-          } else if (el.getAttribute("name")) {
-            selector = `[name="${el.getAttribute("name")}"]`;
-          } else if (el.classList.length > 0) {
-            selector = `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 2).join(".")}`;
-          } else {
-            selector = `${el.tagName.toLowerCase()}:nth-of-type(${index + 1})`;
-          }
+      function getElementSelector(el) {
+        const tag = el.tagName.toLowerCase();
 
-          const tag = el.tagName.toLowerCase();
-          const text = (el.innerText || el.textContent || "").trim().slice(0, 100);
-          const value = (el as HTMLInputElement).value || undefined;
-          const type = (el as HTMLInputElement).type || undefined;
-          const href = (el as HTMLAnchorElement).href || undefined;
+        // 1. ID selector
+        if (el.id && el.id.trim()) {
+          return "#" + getSafeCssEscape(el.id.trim());
+        }
 
-          return { selector, tag, text: text || undefined, value, type, href };
+        // 2. Test attributes
+        const testId = el.getAttribute("data-testid") || el.getAttribute("data-test") || el.getAttribute("data-cy");
+        if (testId) {
+          return '[data-testid="' + getSafeCssEscape(testId) + '"]';
+        }
+
+        // 3. Name attribute
+        const nameAttr = el.getAttribute("name");
+        if (nameAttr) {
+          return tag + '[name="' + getSafeCssEscape(nameAttr) + '"]';
+        }
+
+        // 4. Accessible label
+        const ariaLabel = el.getAttribute("aria-label");
+        if (ariaLabel && ariaLabel.trim().length <= 50) {
+          return tag + '[aria-label="' + getSafeCssEscape(ariaLabel.trim()) + '"]';
+        }
+
+        // 5. Clean CSS classes
+        const validClasses = Array.from(el.classList).filter(function(c) {
+          return /^[a-zA-Z0-9_-]+$/.test(c) && !c.includes(":");
         });
+        if (validClasses.length > 0) {
+          return tag + "." + validClasses.slice(0, 2).map(getSafeCssEscape).join(".");
+        }
 
-        const bodyText = (document.body?.innerText || "").trim().replace(/\s+/g, " ");
-        const contentSummary = bodyText.slice(0, 1000);
+        // 6. Accurate sibling-relative nth-of-type within immediate parent
+        if (el.parentElement) {
+          const siblingsOfSameTag = Array.from(el.parentElement.children).filter(function(child) {
+            return child.tagName.toLowerCase() === tag;
+          });
+          const siblingIndex = siblingsOfSameTag.indexOf(el);
+          if (siblingIndex >= 0) {
+            const parentTag = el.parentElement.tagName.toLowerCase();
+            const parentId = el.parentElement.id ? "#" + getSafeCssEscape(el.parentElement.id) + " > " : "";
+            return parentId + parentTag + " > " + tag + ":nth-of-type(" + (siblingIndex + 1) + ")";
+          }
+        }
 
-        return { elements, contentSummary };
-      }),
+        return tag;
+      }
+
+      const interactiveNodes = Array.from(
+        document.querySelectorAll(
+          'button, a[href], input, select, textarea, [role="button"], [onclick]'
+        )
+      );
+
+      const elements = interactiveNodes.slice(0, 50).map(function(el) {
+        const selector = getElementSelector(el);
+        const tag = el.tagName.toLowerCase();
+        const text = (el.innerText || el.textContent || "").trim().slice(0, 100);
+        const value = el.value || undefined;
+        const type = el.type || undefined;
+        const href = el.href || undefined;
+
+        return { selector, tag, text: text || undefined, value, type, href };
+      });
+
+      const bodyText = (document.body && document.body.innerText ? document.body.innerText : "").trim().replace(/\\s+/g, " ");
+      const contentSummary = bodyText.slice(0, 1000);
+
+      return { elements, contentSummary };
+    })()`;
+
+    const observation = await withAbort(
+      this.page.evaluate<{
+        elements: Array<{
+          selector: string;
+          tag: string;
+          text?: string;
+          value?: string;
+          type?: string;
+          href?: string;
+        }>;
+        contentSummary: string;
+      }>(extractScript),
       options?.signal
     );
 
@@ -258,12 +397,6 @@ export class PlaywrightBrowserSession implements BrowserSession {
       await this.browser.close();
     } catch {
       // ignore
-    }
-  }
-
-  private assertOpen(): void {
-    if (this.closed) {
-      throw new Error(`BrowserSession "${this.sessionId}" is already closed.`);
     }
   }
 }
@@ -321,7 +454,10 @@ export class PlaywrightBrowserProvider implements BrowserProviderAdapter {
 
     const page = await context.newPage();
     const sessionId = generateId("browser");
-    const session = new PlaywrightBrowserSession(sessionId, browser, context, page);
+    const session = new PlaywrightBrowserSession(sessionId, browser, context, page, {
+      navigationValidator: this.options.navigationValidator,
+    });
+    await session.init();
 
     this.sessions.set(sessionId, session);
     return session;

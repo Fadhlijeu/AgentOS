@@ -8,6 +8,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as dns from "dns";
+import * as net from "net";
 import type { RiskLevel } from "@agentos/core";
 import { parseCommand, type ParsedCommand } from "./command-parser";
 
@@ -188,27 +189,70 @@ export function isPrivateHostname(hostname: string): boolean {
 }
 
 /**
+ * Result of host IP safety check.
+ */
+export interface HostIpSafetyResult {
+  safe: boolean;
+  code: "SAFE" | "PRIVATE_IP" | "DNS_FAILURE" | "DNS_EMPTY";
+  reason?: string;
+}
+
+/**
  * Validates that all DNS resolved IP addresses for a given hostname are public addresses.
  * Rejects hostnames resolving to private/internal IPs to prevent SSRF via DNS resolution.
+ * FAILS CLOSED on DNS resolution failure or empty records.
  */
-export async function validateHostIpSafety(hostname: string): Promise<boolean> {
+export async function validateHostIpSafetyDetails(hostname: string): Promise<HostIpSafetyResult> {
   const clean = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (isPrivateHostname(clean)) return false;
+  if (isPrivateHostname(clean)) {
+    return {
+      safe: false,
+      code: "PRIVATE_IP",
+      reason: `Hostname or IP "${clean}" is recognized as a private/internal network address.`,
+    };
+  }
+
+  // If clean is already a valid IP literal
+  if (net.isIP(clean) !== 0) {
+    return { safe: true, code: "SAFE" };
+  }
 
   try {
     const addresses = await dns.promises.lookup(clean, { all: true });
     if (!addresses || addresses.length === 0) {
-      return true;
+      return {
+        safe: false,
+        code: "DNS_EMPTY",
+        reason: `DNS lookup for "${clean}" returned no address records.`,
+      };
     }
     for (const addr of addresses) {
       if (isPrivateIp(addr.address)) {
-        return false;
+        return {
+          safe: false,
+          code: "PRIVATE_IP",
+          reason: `Hostname "${clean}" resolves to private/internal IP address "${addr.address}".`,
+        };
       }
     }
-    return true;
-  } catch {
-    return true;
+    return { safe: true, code: "SAFE" };
+  } catch (err) {
+    return {
+      safe: false,
+      code: "DNS_FAILURE",
+      reason: `DNS resolution failed for "${clean}": ${(err as Error).message}`,
+    };
   }
+}
+
+/**
+ * Validates that all DNS resolved IP addresses for a given hostname are public addresses.
+ * Rejects hostnames resolving to private/internal IPs to prevent SSRF via DNS resolution.
+ * Fails closed (returns false) if DNS resolution fails or returns no records.
+ */
+export async function validateHostIpSafety(hostname: string): Promise<boolean> {
+  const result = await validateHostIpSafetyDetails(hostname);
+  return result.safe;
 }
 
 // ─── Permission Engine ───────────────────────────────────────────────────────
@@ -285,6 +329,44 @@ export class PermissionEngine {
   /** Get the approval timeout in ms. */
   get approvalTimeoutMs(): number {
     return this.policy.approval?.timeoutMs ?? 60_000;
+  }
+
+  /**
+   * Asynchronously validates whether a browser navigation URL is permitted by policy.
+   * Enforces protocol safety (http/https), origin allow/deny lists, and
+   * async DNS pre-resolution SSRF checks against internal/private IPs.
+   */
+  async checkBrowserUrlAsync(urlStr: string): Promise<PermissionDecision> {
+    const syncDecision = this.checkBrowser({ url: urlStr });
+    if (!syncDecision.allowed) {
+      return syncDecision;
+    }
+
+    if (this.policy.trusted) {
+      return { allowed: true };
+    }
+
+    const browserPolicy = this.policy.browser;
+    if (browserPolicy?.allowPrivateNetworks) {
+      return { allowed: true };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(urlStr);
+    } catch {
+      return { allowed: false, reason: `Invalid URL format: "${urlStr}"` };
+    }
+
+    const hostSafety = await validateHostIpSafetyDetails(parsedUrl.hostname);
+    if (!hostSafety.safe) {
+      return {
+        allowed: false,
+        reason: `SSRF protection: browser navigation to "${parsedUrl.hostname}" is blocked (${hostSafety.reason ?? hostSafety.code}).`,
+      };
+    }
+
+    return { allowed: true };
   }
 
   // ── Private Checks ─────────────────────────────────────────────────────

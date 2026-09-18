@@ -11,6 +11,7 @@
 import { z } from "zod";
 import type { Tool } from "./index";
 import type { BrowserProviderAdapter, BrowserSession } from "@agentos/core";
+import { validateHostIpSafety } from "@agentos/permissions";
 
 export const browserOpenSchema = z.object({
   url: z.string().min(1, "URL is required"),
@@ -113,19 +114,44 @@ class BuiltinBrowserSession implements BrowserSession {
  * If no custom BrowserProviderAdapter is supplied, a lightweight virtual session
  * is lazily instantiated to provide high-speed, headless perception and interaction.
  */
-export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
-  let sessionPromise: Promise<BrowserSession> | null = null;
+export interface BrowserToolOptions {
+  provider?: BrowserProviderAdapter;
+  allowPrivateNetworks?: boolean;
+}
 
-  async function getSession(): Promise<BrowserSession> {
-    if (!sessionPromise) {
+export type BrowserToolSuite = Tool[] & {
+  closeRunSession: (runId: string) => Promise<void>;
+  closeAll: () => Promise<void>;
+};
+
+/**
+ * Creates the suite of standard browser automation tools.
+ * Sessions are strictly isolated per task run (keyed by ctx.runId).
+ * If no custom BrowserProviderAdapter is supplied, a lightweight virtual session
+ * is lazily instantiated to provide high-speed perception and interaction.
+ */
+export function browserTools(
+  providerOrOptions?: BrowserProviderAdapter | BrowserToolOptions
+): BrowserToolSuite {
+  const options: BrowserToolOptions =
+    providerOrOptions && "createSession" in providerOrOptions
+      ? { provider: providerOrOptions }
+      : (providerOrOptions as BrowserToolOptions) ?? {};
+
+  const provider = options.provider;
+  const sessionsByRun = new Map<string, Promise<BrowserSession>>();
+
+  async function getSession(runId: string = "default"): Promise<BrowserSession> {
+    let p = sessionsByRun.get(runId);
+    if (!p) {
       if (provider) {
-        sessionPromise = provider.createSession();
+        p = provider.createSession();
       } else {
-        sessionPromise = Promise.resolve(new BuiltinBrowserSession());
+        p = Promise.resolve(new BuiltinBrowserSession());
       }
+      sessionsByRun.set(runId, p);
     }
-    const session = await sessionPromise;
-    return session;
+    return p;
   }
 
   const browserOpenTool: Tool<z.infer<typeof browserOpenSchema>> = {
@@ -147,13 +173,33 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
     execute: async (input, ctx) => {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const { url } = browserOpenSchema.parse(input);
-      const session = await getSession();
+      const runId = ctx?.runId ?? "default";
+
+      // Async DNS-level SSRF protection before opening
+      const allowPrivate =
+        options.allowPrivateNetworks ||
+        process.env.AGENTOS_ALLOW_PRIVATE_NETWORKS === "true";
+      if (!allowPrivate) {
+        const parsedUrl = new URL(url);
+        const isSafe = await validateHostIpSafety(parsedUrl.hostname);
+        if (!isSafe) {
+          throw new Error(
+            `SSRF protection: browser navigation to internal/private IP address "${parsedUrl.hostname}" is blocked.`
+          );
+        }
+      }
+
+      const session = await getSession(runId);
 
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       await session.navigate(url, { signal: ctx?.signal });
 
-      const title = await session.evaluate<string>("document.title", { signal: ctx?.signal }).catch(() => "Unknown");
-      const content = await session.evaluate<string>("document.body.innerText", { signal: ctx?.signal }).catch(() => "");
+      const title = await session
+        .evaluate<string>("document.title", { signal: ctx?.signal })
+        .catch(() => "Unknown");
+      const content = await session
+        .evaluate<string>("document.body.innerText", { signal: ctx?.signal })
+        .catch(() => "");
 
       const preview = content.length > 500 ? content.slice(0, 500) + "..." : content;
 
@@ -180,12 +226,17 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
     execute: async (input, ctx) => {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const { selector } = browserClickSchema.parse(input);
-      const session = await getSession();
+      const runId = ctx?.runId ?? "default";
+      const session = await getSession(runId);
 
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       await session.click(selector, { signal: ctx?.signal });
-      const title = await session.evaluate<string>("document.title", { signal: ctx?.signal }).catch(() => "");
-      const url = await session.evaluate<string>("window.location.href", { signal: ctx?.signal }).catch(() => "");
+      const title = await session
+        .evaluate<string>("document.title", { signal: ctx?.signal })
+        .catch(() => "");
+      const url = await session
+        .evaluate<string>("window.location.href", { signal: ctx?.signal })
+        .catch(() => "");
 
       return `Clicked "${selector}". Current URL: ${url}${title ? ` (Title: "${title}")` : ""}`;
     },
@@ -214,7 +265,8 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
     execute: async (input, ctx) => {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       const { selector, text } = browserTypeSchema.parse(input);
-      const session = await getSession();
+      const runId = ctx?.runId ?? "default";
+      const session = await getSession(runId);
 
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
       await session.type(selector, text, { signal: ctx?.signal });
@@ -234,11 +286,15 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
     },
     execute: async (_input, ctx) => {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
-      const session = await getSession();
+      const runId = ctx?.runId ?? "default";
+      const session = await getSession(runId);
       if (session.observe) {
         const obs = await session.observe({ signal: ctx?.signal });
         const elementSummary = obs.elements
-          .map((el) => `  - [${el.tag}] ${el.selector}${el.text ? ` text="${el.text}"` : ""}${el.value ? ` value="${el.value}"` : ""}${el.href ? ` href="${el.href}"` : ""}`)
+          .map(
+            (el) =>
+              `  - [${el.tag}] ${el.selector}${el.text ? ` text="${el.text}"` : ""}${el.value ? ` value="${el.value}"` : ""}${el.href ? ` href="${el.href}"` : ""}`
+          )
           .join("\n");
 
         return [
@@ -249,8 +305,12 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
         ].join("\n");
       }
 
-      const url = await session.evaluate<string>("window.location.href", { signal: ctx?.signal }).catch(() => "unknown");
-      const title = await session.evaluate<string>("document.title", { signal: ctx?.signal }).catch(() => "unknown");
+      const url = await session
+        .evaluate<string>("window.location.href", { signal: ctx?.signal })
+        .catch(() => "unknown");
+      const title = await session
+        .evaluate<string>("document.title", { signal: ctx?.signal })
+        .catch(() => "unknown");
       return `Current URL: ${url}\nPage Title: ${title}`;
     },
   };
@@ -267,18 +327,71 @@ export function browserTools(provider?: BrowserProviderAdapter): Tool[] {
     },
     execute: async (_input, ctx) => {
       if (ctx?.signal?.aborted) throw new Error("Cancelled");
-      const session = await getSession();
+      const runId = ctx?.runId ?? "default";
+      const session = await getSession(runId);
       const buffer = await session.screenshot({ signal: ctx?.signal });
       const base64 = Buffer.from(buffer).toString("base64");
       return `Screenshot captured (${buffer.byteLength} bytes). Base64 snippet: ${base64.slice(0, 80)}...`;
     },
   };
 
-  return [
+  const browserCloseTool: Tool = {
+    name: "browser_close",
+    description: "Close the browser session for the current task run.",
+    riskLevel: "LOW",
+    parameters: { type: "object", properties: {} },
+    execute: async (_input, ctx) => {
+      const runId = ctx?.runId ?? "default";
+      const sessionPromise = sessionsByRun.get(runId);
+      if (sessionPromise) {
+        sessionsByRun.delete(runId);
+        try {
+          const session = await sessionPromise;
+          await session.close();
+        } catch {
+          // ignore
+        }
+      }
+      return "Browser session closed.";
+    },
+  };
+
+  const suite = [
     browserOpenTool,
     browserClickTool,
     browserTypeTool,
     browserObserveTool,
     browserScreenshotTool,
-  ];
+    browserCloseTool,
+  ] as BrowserToolSuite;
+
+  suite.closeRunSession = async (runId: string) => {
+    const sessionPromise = sessionsByRun.get(runId);
+    if (sessionPromise) {
+      sessionsByRun.delete(runId);
+      try {
+        const session = await sessionPromise;
+        await session.close();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  suite.closeAll = async () => {
+    const promises = Array.from(sessionsByRun.values());
+    sessionsByRun.clear();
+    await Promise.allSettled(
+      promises.map(async (p) => {
+        try {
+          const s = await p;
+          await s.close();
+        } catch {
+          // ignore
+        }
+      })
+    );
+  };
+
+  return suite;
 }
