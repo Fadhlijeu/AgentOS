@@ -136,6 +136,23 @@ export class Agent {
     // Permissions
     this.permissionEngine = new PermissionEngine(config.permissions);
 
+    // Automatically wire central browser and network security gateway into tools
+    const securityValidator = async (url: string) => {
+      const decision = await this.permissionEngine.checkBrowserUrlAsync(url);
+      return decision.allowed;
+    };
+
+    if (config.tools) {
+      if ("setSecurityGateway" in config.tools && typeof (config.tools as any).setSecurityGateway === "function") {
+        (config.tools as any).setSecurityGateway(securityValidator);
+      }
+      for (const tool of this.toolRegistry.getAll()) {
+        if ("setSecurityGateway" in tool && typeof (tool as any).setSecurityGateway === "function") {
+          (tool as any).setSecurityGateway(securityValidator);
+        }
+      }
+    }
+
     // Approval — secure by default: prompt in console unless trusted mode is enabled
     const approvalHandler =
       config.approvalHandler ??
@@ -228,12 +245,16 @@ export class Agent {
       workspace,
     });
 
-    // Wire external signal into run cancellation
+    // Wire external signal into run cancellation without leaking listeners
     if (options?.signal) {
       if (options.signal.aborted) {
         runContext.cancel();
       } else {
-        options.signal.addEventListener("abort", () => runContext.cancel(), { once: true });
+        const onAbort = () => runContext.cancel();
+        options.signal.addEventListener("abort", onAbort, { once: true });
+        runContext.result.finally(() => {
+          options.signal?.removeEventListener("abort", onAbort);
+        });
       }
     }
 
@@ -649,45 +670,22 @@ export class Agent {
         ? "COMPLETED"
         : "ERROR";
 
-      // Emit completion or cancellation event
-      if (finalStatus === "CANCELLED") {
-        this.eventBus.emit("task.cancelled", {
-          runId,
-          taskId,
-          data: {
-            iterations: runContext.iteration,
-            durationMs,
-          },
-        });
-      } else {
-        this.eventBus.emit("task.completed", {
-          runId,
-          taskId,
-          data: {
-            success: isSuccess,
-            iterations: runContext.iteration,
-            durationMs,
-          },
-        });
-      }
-
-      const events = this.eventBus.getEventsByRun(runId);
-      this.tracer.recordTaskEnd(runId, taskId, isSuccess, durationMs);
-
-      // Update run record
+      // 1. Update run record in SQLite FIRST
       try {
-        this.store.saveRun({
-          runId,
-          taskId,
-          task: redactSecrets(task),
-          status: finalStatus,
-          output: redactSecrets(finalAnswer),
-          error: lastError ? redactSecrets(lastError) : null,
-          startedAt: startTime,
-          completedAt: Date.now(),
-          iterations: runContext.iteration,
-          totalTokens: runContext.usage.totalTokens,
-        });
+        await Promise.resolve(
+          this.store.saveRun({
+            runId,
+            taskId,
+            task: redactSecrets(task),
+            status: finalStatus,
+            output: redactSecrets(finalAnswer),
+            error: lastError ? redactSecrets(lastError) : null,
+            startedAt: startTime,
+            completedAt: Date.now(),
+            iterations: runContext.iteration,
+            totalTokens: runContext.usage.totalTokens,
+          })
+        );
       } catch (storeErr) {
         if (this.persistenceMode === "required") {
           throw new Error(`Persistence required: failed to save run record: ${(storeErr as Error).message}`);
@@ -732,6 +730,41 @@ export class Agent {
           data: { operation: "memory.remember", error: (memErr as Error).message },
         });
       }
+
+      // 3. Record trace task end
+      this.tracer.recordTaskEnd(runId, taskId, isSuccess, durationMs);
+
+      // 4. Emit terminal event ONLY AFTER persistence has succeeded
+      if (finalStatus === "CANCELLED") {
+        this.eventBus.emit("task.cancelled", {
+          runId,
+          taskId,
+          data: {
+            iterations: runContext.iteration,
+            durationMs,
+          },
+        });
+      } else if (finalStatus === "COMPLETED") {
+        this.eventBus.emit("task.completed", {
+          runId,
+          taskId,
+          data: {
+            success: isSuccess,
+            iterations: runContext.iteration,
+            durationMs,
+          },
+        });
+      } else {
+        this.eventBus.emit("task.failed", {
+          runId,
+          taskId,
+          data: {
+            error: redactSecrets(lastError || finalAnswer || "Task failed"),
+          },
+        });
+      }
+
+      const events = this.eventBus.getEventsByRun(runId);
 
       if (this.verbose) {
         this.tracer.printTrace(runId);
@@ -801,6 +834,17 @@ export class Agent {
 
       runContext.fail(err, result);
     } finally {
+      // P1-9: Clean up per-run tool resources (such as per-run browser sessions)
+      for (const tool of this.toolRegistry.getAll()) {
+        if ("disposeRun" in tool && typeof (tool as any).disposeRun === "function") {
+          try {
+            await (tool as any).disposeRun(runContext.runId);
+          } catch {
+            // Ignore teardown error during run cleanup
+          }
+        }
+      }
+
       // P1-8: Clean up activeRuns map to prevent memory leaks.
       // Once a run reaches a terminal state, there's no reason to keep it in the map.
       this.activeRuns.delete(runContext.runId);
@@ -858,7 +902,7 @@ export class Agent {
 
     // ── Permission Check ────────────────────────────────────────────────
     const permission = this.permissionEngine.check(
-      toolCall.name,
+      tool,
       toolCall.arguments as Record<string, unknown>
     );
     if (!permission.allowed) {
@@ -905,6 +949,10 @@ export class Agent {
       emit: (event, data) =>
         this.eventBus.emit(event as any, { runId, taskId, data }),
       signal,
+      networkValidator: async (url: string) => {
+        const check = await this.permissionEngine.checkHttpUrlAsync(url);
+        return check.allowed;
+      },
     };
 
     const toolStart = Date.now();

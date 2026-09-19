@@ -62,6 +62,8 @@ function filesystemRead(workspace?: WorkspaceAdapter): Tool {
     },
     schema: filesystemReadSchema,
     riskLevel: "LOW",
+    category: "filesystem",
+    capability: "filesystem.read",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
@@ -115,6 +117,8 @@ function filesystemWrite(workspace?: WorkspaceAdapter): Tool {
     },
     schema: filesystemWriteSchema,
     riskLevel: "MEDIUM",
+    category: "filesystem",
+    capability: "filesystem.write",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
@@ -160,6 +164,8 @@ function filesystemList(workspace?: WorkspaceAdapter): Tool {
     },
     schema: filesystemListSchema,
     riskLevel: "LOW",
+    category: "filesystem",
+    capability: "filesystem.read",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
@@ -224,6 +230,8 @@ function filesystemExists(workspace?: WorkspaceAdapter): Tool {
     },
     schema: filesystemExistsSchema,
     riskLevel: "LOW",
+    category: "filesystem",
+    capability: "filesystem.read",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
@@ -274,6 +282,8 @@ function filesystemMove(workspace?: WorkspaceAdapter): Tool {
     },
     schema: filesystemMoveSchema,
     riskLevel: "HIGH",
+    category: "filesystem",
+    capability: "filesystem.write",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext
@@ -322,6 +332,8 @@ function filesystemDelete(workspace?: WorkspaceAdapter): Tool {
     },
     schema: filesystemDeleteSchema,
     riskLevel: "CRITICAL",
+    category: "filesystem",
+    capability: "filesystem.write",
     async execute(
       input: Record<string, unknown>,
       _ctx: ToolContext

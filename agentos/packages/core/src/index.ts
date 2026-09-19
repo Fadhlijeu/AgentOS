@@ -14,6 +14,8 @@ export type {
   BrowserProviderAdapter,
   ToolErrorCode,
   ToolExecutionResult,
+  ToolCategory,
+  ToolCapability,
 } from "./types";
 
 export { generateId, isRiskAtLeast } from "./types";

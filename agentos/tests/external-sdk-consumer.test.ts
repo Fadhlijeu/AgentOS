@@ -80,7 +80,7 @@ async function run() {
     throw new Error("Agent run failed in external consumer");
   }
 
-  console.log("EXTERNAL_CONSUMER_SUCCESS: " + result.finalAnswer);
+  console.log("EXTERNAL_CONSUMER_SUCCESS: " + (result.output ?? result.finalAnswer));
   await agent.dispose();
 }
 

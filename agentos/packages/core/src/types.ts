@@ -132,6 +132,26 @@ export interface BrowserProviderAdapter {
   createSession(options?: Record<string, unknown>): Promise<BrowserSession>;
 }
 
+// ─── Tool Classification & Capability ───────────────────────────────────────
+
+export type ToolCategory =
+  | "filesystem"
+  | "terminal"
+  | "browser"
+  | "http"
+  | "code_interpreter"
+  | "custom";
+
+export type ToolCapability =
+  | "filesystem.read"
+  | "filesystem.write"
+  | "terminal.execute"
+  | "browser.navigate"
+  | "browser.interact"
+  | "network.request"
+  | "code.interpret"
+  | "custom";
+
 // ─── Tool Error Classification ───────────────────────────────────────────────
 
 export type ToolErrorCode =
@@ -152,3 +172,4 @@ export interface ToolExecutionResult {
     retryable: boolean;
   };
 }
+

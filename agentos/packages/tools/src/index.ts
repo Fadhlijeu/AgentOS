@@ -2,7 +2,7 @@
 // Tool system interfaces and ToolRegistry. Every capability in AgentOS is a
 // tool — filesystem access, terminal commands, browser actions, HTTP, etc.
 
-import type { RiskLevel, ModelToolDefinition } from "@agentos/core";
+import type { RiskLevel, ModelToolDefinition, ToolCategory, ToolCapability } from "@agentos/core";
 
 // ─── Tool Context ────────────────────────────────────────────────────────────
 
@@ -16,6 +16,8 @@ export interface ToolContext {
   emit: (event: string, data: Record<string, unknown>) => void;
   /** Optional cancellation signal for aborting active tool execution. */
   signal?: AbortSignal;
+  /** Central network/origin validator provided by the control plane. */
+  networkValidator?: (url: string) => Promise<boolean | { allowed: boolean; reason?: string }> | boolean | { allowed: boolean; reason?: string };
 }
 
 import { z } from "zod";
@@ -28,7 +30,9 @@ import { z } from "zod";
  * - A JSON Schema describing its parameters (sent to LLM)
  * - An optional runtime Zod schema for input validation
  * - A risk level determining approval requirements
+ * - An explicit category and capability for control-plane permission checking
  * - An execute function that performs the actual work
+ * - An optional disposeRun function for per-run resource teardown
  */
 export interface Tool<TInput = Record<string, unknown>> {
   /** Unique tool name, e.g. "filesystem_read" or "terminal_exec". */
@@ -41,6 +45,12 @@ export interface Tool<TInput = Record<string, unknown>> {
   schema?: z.ZodType<TInput, any, any>;
   /** Risk level — determines whether human approval is required. */
   riskLevel: RiskLevel;
+  /** Explicit tool category for control-plane policy evaluation. */
+  category?: ToolCategory;
+  /** Explicit tool capability name, e.g. "filesystem.read" or "browser.navigate". */
+  capability?: ToolCapability | string;
+  /** Optional per-run resource teardown called on run completion/failure/cancellation. */
+  disposeRun?(runId: string): Promise<void>;
   /**
    * Execute the tool with the given input.
    * Returns a string result that is fed back to the LLM as an observation.
@@ -206,3 +216,4 @@ export {
   browserObserveSchema,
   browserScreenshotSchema,
 } from "./browser";
+export type { BrowserToolSuite, BrowserToolOptions } from "./browser";

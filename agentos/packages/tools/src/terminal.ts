@@ -19,9 +19,11 @@ function terminalExec(): Tool {
   return {
     name: "terminal_exec",
     description:
-      "Execute a shell command and return its output. Captures both stdout and stderr. " +
-      "Use this to run programs, check system state, install packages, use git, etc. " +
+      "Execute a shell command on the host machine and return its output. Captures both stdout and stderr. " +
+      "Commands run directly on the host operating system without OS container sandboxing (HIGH RISK). " +
       "Commands run with a timeout (default 30s). Chained commands (&&, ;, |) are strictly blocked for security.",
+    category: "terminal",
+    capability: "terminal.execute",
     parameters: {
       type: "object",
       properties: {

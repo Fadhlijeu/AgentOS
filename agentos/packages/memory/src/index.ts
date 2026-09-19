@@ -205,12 +205,11 @@ export class MemoryManager {
     await this.store.set(keyPath, value, "working", tags);
   }
 
-  /** Get a value from working memory (checks run-scoped key first if runId provided). */
+  /** Get a value from working memory (strictly run-scoped if runId provided). */
   async getWorking(key: string, runId?: string): Promise<unknown | null> {
     const clean = this.cleanKey(key);
     if (runId) {
-      const runScoped = await this.store.get(`working:${runId}:${clean}`);
-      if (runScoped !== null) return runScoped;
+      return await this.store.get(`working:${runId}:${clean}`);
     }
     return (
       (await this.store.get(`working:${clean}`)) ??

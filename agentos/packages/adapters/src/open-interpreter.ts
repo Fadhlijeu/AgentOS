@@ -208,7 +208,9 @@ export function createInterpreterTool(adapter: CodeInterpreterAdapter): Tool {
   return {
     name: "code_interpret",
     description:
-      "Execute multi-language code (python, javascript, bash, powershell) in an isolated process and inspect stdout/stderr outputs.",
+      "Execute multi-language code (python, javascript, bash, powershell) on the host machine in a child process with sanitized environment variables (UNSANDBOXED HOST EXECUTION - HIGH RISK).",
+    category: "code_interpreter",
+    capability: "code.interpret",
     parameters: {
       type: "object",
       properties: {

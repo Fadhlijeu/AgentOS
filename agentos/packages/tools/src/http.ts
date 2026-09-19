@@ -21,6 +21,14 @@ export type HttpRequestInput = z.infer<typeof httpRequestSchema>;
 
 export interface HttpToolOptions {
   allowPrivateNetworks?: boolean;
+  allowOrigins?: string[];
+  denyOrigins?: string[];
+  permissionValidator?: (
+    url: string
+  ) =>
+    | Promise<boolean | { allowed: boolean; reason?: string }>
+    | boolean
+    | { allowed: boolean; reason?: string };
 }
 
 function httpRequest(options?: HttpToolOptions): Tool {
@@ -29,6 +37,8 @@ function httpRequest(options?: HttpToolOptions): Tool {
     description:
       "Make an HTTP/HTTPS network request to fetch web pages, call REST APIs, or interact with web services. " +
       "Supports GET, POST, PUT, DELETE, PATCH, custom headers, and request bodies.",
+    category: "http",
+    capability: "network.request",
     parameters: {
       type: "object",
       properties: {
@@ -119,9 +129,46 @@ function httpRequest(options?: HttpToolOptions): Tool {
         let redirectCount = 0;
         const MAX_REDIRECTS = 5;
 
-        const allowPrivate = options?.allowPrivateNetworks || process.env.AGENTOS_ALLOW_PRIVATE_NETWORKS === "true";
+        // Policy precedence: Explicit option takes priority, no uncontrolled env override of explicit deny
+        const allowPrivate = options?.allowPrivateNetworks === true;
         while (true) {
           const parsedTarget = new URL(currentUrl);
+
+          // P0-Audit10: Validate against central permissionValidator or ctx.networkValidator or options
+          if (options?.permissionValidator) {
+            const res: any = await options.permissionValidator(currentUrl);
+            const allowed = typeof res === "boolean" ? res : Boolean(res?.allowed);
+            if (!allowed) {
+              const reason = res && typeof res === "object" && res.reason ? res.reason : "URL blocked by policy";
+              throw new Error(`Security policy violation: HTTP request to "${currentUrl}" is restricted (${reason}).`);
+            }
+          } else if (ctx?.networkValidator) {
+            const res = await ctx.networkValidator(currentUrl);
+            const allowed = typeof res === "boolean" ? res : Boolean((res as any)?.allowed ?? res);
+            if (!allowed) {
+              throw new Error(`Security policy violation: HTTP request to "${currentUrl}" is restricted.`);
+            }
+          } else {
+            if (options?.denyOrigins && options.denyOrigins.length > 0) {
+              const curOrigin = parsedTarget.origin.toLowerCase();
+              const isDenied = options.denyOrigins.some(
+                (d) => d.toLowerCase().replace(/\/$/, "") === curOrigin
+              );
+              if (isDenied) {
+                throw new Error(`Security policy violation: HTTP request to denied origin "${curOrigin}".`);
+              }
+            }
+            if (options?.allowOrigins && options.allowOrigins.length > 0) {
+              const curOrigin = parsedTarget.origin.toLowerCase();
+              const isAllowed = options.allowOrigins.some(
+                (a) => a === "*" || a.toLowerCase().replace(/\/$/, "") === curOrigin
+              );
+              if (!isAllowed) {
+                throw new Error(`Security policy violation: HTTP request to untrusted origin "${curOrigin}" not in allowOrigins.`);
+              }
+            }
+          }
+
           if (!allowPrivate) {
             const isSafe = await validateHostIpSafety(parsedTarget.hostname);
             if (!isSafe) {
@@ -156,6 +203,42 @@ function httpRequest(options?: HttpToolOptions): Tool {
 
             if (nextParsed.protocol !== "http:" && nextParsed.protocol !== "https:") {
               throw new Error(`SSRF protection: Redirect to forbidden protocol "${nextParsed.protocol}" blocked.`);
+            }
+
+            // P0-Audit10: Enforce origin allow/deny policy and central validator on EVERY redirect hop
+            if (options?.permissionValidator) {
+              const res: any = await options.permissionValidator(nextUrl);
+              const allowed = typeof res === "boolean" ? res : Boolean(res?.allowed);
+              if (!allowed) {
+                const reason = res && typeof res === "object" && res.reason ? res.reason : "URL blocked by policy";
+                throw new Error(`Security policy violation: HTTP redirect to "${nextUrl}" is restricted (${reason}).`);
+              }
+            } else if (ctx?.networkValidator) {
+              const res = await ctx.networkValidator(nextUrl);
+              const allowed = typeof res === "boolean" ? res : Boolean((res as any)?.allowed ?? res);
+              if (!allowed) {
+                throw new Error(`Security policy violation: HTTP redirect to "${nextUrl}" is restricted.`);
+              }
+            } else {
+              // Direct origin check against options if no central validator is wired
+              if (options?.denyOrigins && options.denyOrigins.length > 0) {
+                const nextOrigin = nextParsed.origin.toLowerCase();
+                const isDenied = options.denyOrigins.some(
+                  (d) => d.toLowerCase().replace(/\/$/, "") === nextOrigin
+                );
+                if (isDenied) {
+                  throw new Error(`Security policy violation: HTTP redirect to denied origin "${nextOrigin}".`);
+                }
+              }
+              if (options?.allowOrigins && options.allowOrigins.length > 0) {
+                const nextOrigin = nextParsed.origin.toLowerCase();
+                const isAllowed = options.allowOrigins.some(
+                  (a) => a === "*" || a.toLowerCase().replace(/\/$/, "") === nextOrigin
+                );
+                if (!isAllowed) {
+                  throw new Error(`Security policy violation: HTTP redirect to untrusted origin "${nextOrigin}" not in allowOrigins.`);
+                }
+              }
             }
 
             if (!allowPrivate) {

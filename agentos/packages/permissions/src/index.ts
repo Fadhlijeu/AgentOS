@@ -53,6 +53,13 @@ export interface PermissionPolicy {
     allowPrivateNetworks?: boolean;
   };
 
+  codeInterpreter?: {
+    /** Whether code interpreter / execution tools are enabled. Default: true. */
+    enabled?: boolean;
+    /** Allowed programming languages. Default: all. */
+    allowedLanguages?: string[];
+  };
+
   approval?: {
     /** Lowest risk level that requires human approval. Default: "HIGH". */
     requireFor: RiskLevel;
@@ -262,38 +269,60 @@ export class PermissionEngine {
 
   /**
    * Check whether a specific tool call is permitted.
+   * Prioritizes explicit tool category/capability declarations to prevent name-prefix spoofing.
    */
-  check(toolName: string, input: Record<string, unknown>): PermissionDecision {
+  check(
+    toolOrName: string | { name: string; category?: string; capability?: string },
+    input: Record<string, unknown>
+  ): PermissionDecision {
+    const toolObj = typeof toolOrName === "object" ? toolOrName : undefined;
+    const toolName = typeof toolOrName === "string" ? toolOrName : toolOrName.name;
     const normalizedName = toolName.replace(/\./g, "_");
 
+    const category = toolObj?.category;
+    const capability = toolObj?.capability;
+
     // ── Filesystem checks ──────────────────────────────────────────────
-    if (normalizedName.startsWith("filesystem_")) {
+    if (category === "filesystem" || (!category && normalizedName.startsWith("filesystem_"))) {
       return this.checkFilesystem(normalizedName, input);
     }
 
     // ── Terminal checks ────────────────────────────────────────────────
-    if (normalizedName.startsWith("terminal_")) {
+    if (category === "terminal" || (!category && normalizedName.startsWith("terminal_"))) {
       return this.checkTerminal(input);
     }
 
     // ── Browser checks ─────────────────────────────────────────────────
-    if (normalizedName.startsWith("browser_")) {
+    if (category === "browser" || (!category && normalizedName.startsWith("browser_"))) {
       return this.checkBrowser(input);
     }
 
     // ── HTTP checks ────────────────────────────────────────────────────
     if (
-      normalizedName.startsWith("http_") ||
-      normalizedName === "http_request"
+      category === "http" ||
+      (!category && (normalizedName.startsWith("http_") || normalizedName === "http_request"))
     ) {
       return this.checkHttp(input);
     }
 
     // ── Code interpreter checks (HIGH risk tools) ──────────────────────
-    if (normalizedName === "code_interpret") {
+    if (
+      category === "code_interpreter" ||
+      capability === "code.interpret" ||
+      (!category && normalizedName === "code_interpret")
+    ) {
       if (this.policy.trusted) return { allowed: true };
-      // code_interpret is gated by approval, but permission check still passes
-      // since the approval manager handles the risk-level gate
+      if (this.policy.codeInterpreter && this.policy.codeInterpreter.enabled === false) {
+        return {
+          allowed: false,
+          reason: "Code interpreter tools are disabled by permission policy.",
+        };
+      }
+      return { allowed: true };
+    }
+
+    // ── Custom declared application tools ──────────────────────────────
+    if (category === "custom") {
       return { allowed: true };
     }
 
@@ -304,7 +333,7 @@ export class PermissionEngine {
     }
     return {
       allowed: false,
-      reason: `Unknown tool category "${toolName}". Configure permissions or enable trusted mode.`,
+      reason: `Unknown tool category "${category || toolName}". Configure permissions or enable trusted mode.`,
     };
   }
 
@@ -747,6 +776,44 @@ export class PermissionEngine {
   /** Public checker for HTTP URLs (used for redirect validation and standalone URL checks). */
   checkHttpUrl(url: string): PermissionDecision {
     return this.checkHttp({ url });
+  }
+
+  /**
+   * Asynchronously validates whether an HTTP request URL is permitted by policy.
+   * Enforces protocol safety (http/https), origin allow/deny lists, and
+   * async DNS pre-resolution SSRF checks against internal/private IPs.
+   */
+  async checkHttpUrlAsync(urlStr: string): Promise<PermissionDecision> {
+    const syncDecision = this.checkHttp({ url: urlStr });
+    if (!syncDecision.allowed) {
+      return syncDecision;
+    }
+
+    if (this.policy.trusted) {
+      return { allowed: true };
+    }
+
+    const httpPolicy = this.policy.http;
+    if (httpPolicy?.allowPrivateNetworks) {
+      return { allowed: true };
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(urlStr);
+    } catch {
+      return { allowed: false, reason: `Invalid URL: "${urlStr}"` };
+    }
+
+    const hostCheck = await validateHostIpSafetyDetails(parsed.hostname);
+    if (!hostCheck.safe) {
+      return {
+        allowed: false,
+        reason: `SSRF protection: HTTP request to "${urlStr}" blocked: ${hostCheck.reason || "host resolved to private network or unresolvable"}`,
+      };
+    }
+
+    return { allowed: true };
   }
 
   /** Public checker for Browser URLs (used for navigation and redirect checks). */

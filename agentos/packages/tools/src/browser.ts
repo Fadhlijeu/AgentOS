@@ -109,19 +109,25 @@ class BuiltinBrowserSession implements BrowserSession {
   }
 }
 
+export type NavigationValidator = (url: string) => Promise<boolean> | boolean;
+
 /**
- * Creates the suite of 5 standard browser automation tools.
+ * Creates the suite of standard browser automation tools.
  * If no custom BrowserProviderAdapter is supplied, a lightweight virtual session
  * is lazily instantiated to provide high-speed, headless perception and interaction.
  */
 export interface BrowserToolOptions {
   provider?: BrowserProviderAdapter;
   allowPrivateNetworks?: boolean;
+  securityGateway?: NavigationValidator;
 }
 
 export type BrowserToolSuite = Tool[] & {
   closeRunSession: (runId: string) => Promise<void>;
   closeAll: () => Promise<void>;
+  setSecurityGateway: (validator: NavigationValidator) => void;
+  getProvider: () => BrowserProviderAdapter | undefined;
+  getActiveRunCount: () => number;
 };
 
 /**
@@ -139,19 +145,45 @@ export function browserTools(
       : (providerOrOptions as BrowserToolOptions) ?? {};
 
   const provider = options.provider;
+  let activeSecurityGateway: NavigationValidator | undefined = options.securityGateway;
+
+  if (
+    provider &&
+    "setNavigationValidator" in provider &&
+    typeof (provider as any).setNavigationValidator === "function" &&
+    activeSecurityGateway
+  ) {
+    (provider as any).setNavigationValidator(activeSecurityGateway);
+  }
+
   const sessionsByRun = new Map<string, Promise<BrowserSession>>();
 
   async function getSession(runId: string = "default"): Promise<BrowserSession> {
     let p = sessionsByRun.get(runId);
     if (!p) {
       if (provider) {
+        if (
+          "setNavigationValidator" in provider &&
+          typeof (provider as any).setNavigationValidator === "function" &&
+          activeSecurityGateway
+        ) {
+          (provider as any).setNavigationValidator(activeSecurityGateway);
+        }
         p = provider.createSession();
       } else {
         p = Promise.resolve(new BuiltinBrowserSession());
       }
       sessionsByRun.set(runId, p);
     }
-    return p;
+    const session = await p;
+    if (
+      activeSecurityGateway &&
+      "setNavigationValidator" in session &&
+      typeof (session as any).setNavigationValidator === "function"
+    ) {
+      (session as any).setNavigationValidator(activeSecurityGateway);
+    }
+    return session;
   }
 
   const browserOpenTool: Tool<z.infer<typeof browserOpenSchema>> = {
@@ -159,6 +191,8 @@ export function browserTools(
     description:
       "Navigate the browser to a URL and inspect the page title and textual content.",
     riskLevel: "MEDIUM",
+    category: "browser",
+    capability: "browser.navigate",
     schema: browserOpenSchema,
     parameters: {
       type: "object",
@@ -175,17 +209,33 @@ export function browserTools(
       const { url } = browserOpenSchema.parse(input);
       const runId = ctx?.runId ?? "default";
 
-      // Async DNS-level SSRF protection before opening
-      const allowPrivate =
-        options.allowPrivateNetworks ||
-        process.env.AGENTOS_ALLOW_PRIVATE_NETWORKS === "true";
-      if (!allowPrivate) {
-        const parsedUrl = new URL(url);
-        const isSafe = await validateHostIpSafety(parsedUrl.hostname);
-        if (!isSafe) {
+      // If tool context provides networkValidator and no gateway was configured, use it
+      if (ctx?.networkValidator && !activeSecurityGateway) {
+        activeSecurityGateway = async (targetUrl: string) => {
+          const res = await ctx.networkValidator!(targetUrl);
+          return typeof res === "boolean" ? res : Boolean(res?.allowed);
+        };
+      }
+
+      // Security gateway / async DNS validation check before opening
+      if (activeSecurityGateway) {
+        const allowed = await activeSecurityGateway(url);
+        if (!allowed) {
           throw new Error(
-            `SSRF protection: browser navigation to internal/private IP address "${parsedUrl.hostname}" is blocked.`
+            `SSRF protection: browser navigation to "${url}" is blocked by security policy.`
           );
+        }
+      } else {
+        // Fallback to DNS IP safety check if no central gateway is wired
+        const allowPrivate = options.allowPrivateNetworks === true;
+        if (!allowPrivate) {
+          const parsedUrl = new URL(url);
+          const isSafe = await validateHostIpSafety(parsedUrl.hostname);
+          if (!isSafe) {
+            throw new Error(
+              `SSRF protection: browser navigation to internal/private IP address "${parsedUrl.hostname}" is blocked.`
+            );
+          }
         }
       }
 
@@ -212,6 +262,8 @@ export function browserTools(
     description:
       "Click an interactive element (link, button) matching a CSS selector.",
     riskLevel: "MEDIUM",
+    category: "browser",
+    capability: "browser.interact",
     schema: browserClickSchema,
     parameters: {
       type: "object",
@@ -247,6 +299,8 @@ export function browserTools(
     description:
       "Type text into a form input or textarea matching a CSS selector.",
     riskLevel: "MEDIUM",
+    category: "browser",
+    capability: "browser.interact",
     schema: browserTypeSchema,
     parameters: {
       type: "object",
@@ -279,6 +333,8 @@ export function browserTools(
     description:
       "Observe the current browser page state, returning URL, title, text outline, and interactive elements.",
     riskLevel: "LOW",
+    category: "browser",
+    capability: "browser.interact",
     schema: browserObserveSchema,
     parameters: {
       type: "object",
@@ -320,6 +376,8 @@ export function browserTools(
     description:
       "Capture a visual snapshot of the current browser page.",
     riskLevel: "LOW",
+    category: "browser",
+    capability: "browser.interact",
     schema: browserScreenshotSchema,
     parameters: {
       type: "object",
@@ -339,19 +397,12 @@ export function browserTools(
     name: "browser_close",
     description: "Close the browser session for the current task run.",
     riskLevel: "LOW",
+    category: "browser",
+    capability: "browser.interact",
     parameters: { type: "object", properties: {} },
     execute: async (_input, ctx) => {
       const runId = ctx?.runId ?? "default";
-      const sessionPromise = sessionsByRun.get(runId);
-      if (sessionPromise) {
-        sessionsByRun.delete(runId);
-        try {
-          const session = await sessionPromise;
-          await session.close();
-        } catch {
-          // ignore
-        }
-      }
+      await suite.closeRunSession(runId);
       return "Browser session closed.";
     },
   };
@@ -372,11 +423,40 @@ export function browserTools(
       try {
         const session = await sessionPromise;
         await session.close();
+        if (
+          provider &&
+          "closeSession" in provider &&
+          typeof (provider as any).closeSession === "function"
+        ) {
+          await (provider as any).closeSession(session.sessionId).catch(() => {});
+        }
       } catch {
         // ignore
       }
     }
   };
+
+  // Wire per-run teardown hook on each tool in suite
+  for (const tool of suite) {
+    tool.disposeRun = async (runId: string) => {
+      await suite.closeRunSession(runId);
+    };
+  }
+
+  suite.setSecurityGateway = (validator: NavigationValidator) => {
+    activeSecurityGateway = validator;
+    if (
+      provider &&
+      "setNavigationValidator" in provider &&
+      typeof (provider as any).setNavigationValidator === "function"
+    ) {
+      (provider as any).setNavigationValidator(validator);
+    }
+  };
+
+  suite.getProvider = () => provider;
+  suite.getActiveRunCount = () => sessionsByRun.size;
+  (suite as any).sessionsByRun = sessionsByRun;
 
   suite.closeAll = async () => {
     const promises = Array.from(sessionsByRun.values());
@@ -386,6 +466,13 @@ export function browserTools(
         try {
           const s = await p;
           await s.close();
+          if (
+            provider &&
+            "closeSession" in provider &&
+            typeof (provider as any).closeSession === "function"
+          ) {
+            await (provider as any).closeSession(s.sessionId).catch(() => {});
+          }
         } catch {
           // ignore
         }

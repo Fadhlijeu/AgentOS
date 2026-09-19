@@ -12,6 +12,7 @@ export type NavigationValidator = (url: string) => Promise<boolean> | boolean;
 
 export interface PlaywrightSessionOptions {
   navigationValidator?: NavigationValidator;
+  onClose?: (sessionId: string) => void;
 }
 
 export interface PlaywrightBrowserOptions {
@@ -28,7 +29,7 @@ export interface PlaywrightBrowserOptions {
    */
   sandbox?: boolean;
   /**
-   * Optional async or sync validator for all navigations (goto, links, redirects).
+   * Optional async or sync validator for all navigations (goto, links, redirects, subresources).
    */
   navigationValidator?: NavigationValidator;
 }
@@ -106,6 +107,7 @@ export class PlaywrightBrowserSession implements BrowserSession {
   private title: string = "";
   private navigationValidator?: NavigationValidator;
   private routeInitialized: boolean = false;
+  private onClose?: (sessionId: string) => void;
 
   constructor(
     sessionId: string,
@@ -119,35 +121,49 @@ export class PlaywrightBrowserSession implements BrowserSession {
     this.context = context;
     this.page = page;
     this.navigationValidator = options?.navigationValidator;
+    this.onClose = options?.onClose;
+  }
+
+  /**
+   * Set or update the security policy validator dynamically.
+   */
+  setNavigationValidator(validator: NavigationValidator): void {
+    this.navigationValidator = validator;
   }
 
   /**
    * Initializes network route policy interception on the browser page.
-   * Intercepts goto, link clicks, redirects, and JS navigations.
+   * Intercepts goto, link clicks, redirects, JS navigations, fetch, XHR,
+   * WebSocket, and all outbound subresource requests.
    */
   async init(): Promise<void> {
     if (this.routeInitialized) return;
     this.routeInitialized = true;
 
-    if (this.navigationValidator) {
-      await this.page.route("**/*", async (route) => {
-        const req = route.request();
-        if (req.isNavigationRequest()) {
-          const targetUrl = req.url();
-          try {
-            const allowed = await this.navigationValidator!(targetUrl);
-            if (!allowed) {
-              await route.abort("blockedbyclient");
-              return;
-            }
-          } catch {
+    await this.page.route("**/*", async (route) => {
+      const targetUrl = route.request().url();
+
+      // Permit safe internal schemes
+      if (targetUrl.startsWith("data:") || targetUrl.startsWith("about:")) {
+        await route.continue();
+        return;
+      }
+
+      if (this.navigationValidator) {
+        try {
+          const allowed = await this.navigationValidator(targetUrl);
+          if (!allowed) {
             await route.abort("blockedbyclient");
             return;
           }
+        } catch {
+          await route.abort("blockedbyclient");
+          return;
         }
-        await route.continue();
-      });
-    }
+      }
+
+      await route.continue();
+    });
   }
 
   private assertOpen(): void {
@@ -389,6 +405,11 @@ export class PlaywrightBrowserSession implements BrowserSession {
     if (this.closed) return;
     this.closed = true;
     try {
+      this.onClose?.(this.sessionId);
+    } catch {
+      // ignore
+    }
+    try {
       await this.context.close();
     } catch {
       // ignore
@@ -407,9 +428,29 @@ export class PlaywrightBrowserSession implements BrowserSession {
 export class PlaywrightBrowserProvider implements BrowserProviderAdapter {
   private options: PlaywrightBrowserOptions;
   private sessions = new Map<string, PlaywrightBrowserSession>();
+  private navigationValidator?: NavigationValidator;
 
   constructor(options: PlaywrightBrowserOptions = {}) {
     this.options = options;
+    this.navigationValidator = options.navigationValidator;
+  }
+
+  /**
+   * Set or update the security policy validator for all current and future sessions.
+   */
+  setNavigationValidator(validator: NavigationValidator): void {
+    this.navigationValidator = validator;
+    for (const session of this.sessions.values()) {
+      session.setNavigationValidator(validator);
+    }
+  }
+
+  getNavigationValidator(): NavigationValidator | undefined {
+    return this.navigationValidator;
+  }
+
+  getSessions(): Map<string, PlaywrightBrowserSession> {
+    return this.sessions;
   }
 
   async createSession(options?: Record<string, unknown>): Promise<PlaywrightBrowserSession> {
@@ -455,7 +496,10 @@ export class PlaywrightBrowserProvider implements BrowserProviderAdapter {
     const page = await context.newPage();
     const sessionId = generateId("browser");
     const session = new PlaywrightBrowserSession(sessionId, browser, context, page, {
-      navigationValidator: this.options.navigationValidator,
+      navigationValidator: this.navigationValidator ?? this.options.navigationValidator,
+      onClose: (id) => {
+        this.sessions.delete(id);
+      },
     });
     await session.init();
 
@@ -465,8 +509,8 @@ export class PlaywrightBrowserProvider implements BrowserProviderAdapter {
 
   async closeSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
+    this.sessions.delete(sessionId);
     if (session) {
-      this.sessions.delete(sessionId);
       await session.close();
     }
   }
