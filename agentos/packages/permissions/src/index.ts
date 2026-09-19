@@ -21,6 +21,13 @@ export interface PermissionPolicy {
    */
   trusted?: boolean;
 
+  customTools?: {
+    /** Explicitly allowed custom tool names. */
+    allow?: string[];
+    /** Explicitly denied custom tool names. */
+    deny?: string[];
+  };
+
   filesystem?: {
     /** Paths the agent may read from (canonical boundary matching). */
     read?: string[];
@@ -153,34 +160,174 @@ export function isPathInside(parent: string, child: string): boolean {
 
 // ─── SSRF Private IP & DNS Detection ─────────────────────────────────────────
 
+function parseIpv4ToUint32(ip: string): number | null {
+  const parts = ip.trim().split(".");
+  if (parts.length !== 4) return null;
+  let num = 0;
+  for (let i = 0; i < 4; i++) {
+    const part = parts[i];
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const val = Number(part);
+    if (val < 0 || val > 255) return null;
+    if (part.length > 1 && part.startsWith("0")) return null;
+    num = ((num << 8) | val) >>> 0;
+  }
+  return num;
+}
+
+function isPrivateIpv4Num(num: number): boolean {
+  // 0.0.0.0/8 (current network)
+  if ((num >>> 24) === 0) return true;
+  // 10.0.0.0/8 (private)
+  if ((num >>> 24) === 10) return true;
+  // 100.64.0.0/10 (CGNAT: 100.64.0.0 - 100.127.255.255)
+  if ((num >>> 22) === 401) return true;
+  // 127.0.0.0/8 (loopback)
+  if ((num >>> 24) === 127) return true;
+  // 169.254.0.0/16 (link-local / cloud metadata)
+  if ((num >>> 16) === 0xa9fe) return true;
+  // 172.16.0.0/12 (private: 172.16.0.0 - 172.31.255.255)
+  if ((num >>> 20) === 2753) return true;
+  // 192.0.0.0/24 (IETF protocol assignments)
+  if ((num >>> 8) === 0xc00000) return true;
+  // 192.0.2.0/24 (TEST-NET-1)
+  if ((num >>> 8) === 0xc00002) return true;
+  // 192.168.0.0/16 (private)
+  if ((num >>> 16) === 0xc0a8) return true;
+  // 198.18.0.0/15 (network benchmark: 198.18.0.0 - 198.19.255.255)
+  if ((num >>> 17) === 6338) return true;
+  // 198.51.100.0/24 (TEST-NET-2)
+  if ((num >>> 8) === 0xc63364) return true;
+  // 203.0.113.0/24 (TEST-NET-3)
+  if ((num >>> 8) === 0xcb0071) return true;
+  // 224.0.0.0/4 (multicast 224-239 and reserved 240-255)
+  if ((num >>> 28) >= 14) return true;
+  // 255.255.255.255/32 (broadcast)
+  if (num === 0xffffffff) return true;
+  return false;
+}
+
+function wordsToBigInt(words: string[]): bigint | null {
+  let res = 0n;
+  for (const w of words) {
+    if (!/^[0-9a-f]{1,4}$/.test(w)) return null;
+    const val = parseInt(w, 16);
+    if (isNaN(val) || val < 0 || val > 0xffff) return null;
+    res = (res << 16n) | BigInt(val);
+  }
+  return res;
+}
+
+function parseIpv6ToBigInt(ipStr: string): bigint | null {
+  let clean = ipStr.trim().toLowerCase();
+  // Strip zone ID (%eth0)
+  const zoneIdx = clean.indexOf("%");
+  if (zoneIdx !== -1) {
+    clean = clean.slice(0, zoneIdx);
+  }
+
+  // Handle embedded IPv4 at the end, e.g. ::ffff:192.168.1.1 or ::127.0.0.1
+  const lastColon = clean.lastIndexOf(":");
+  if (lastColon !== -1 && clean.slice(lastColon + 1).includes(".")) {
+    const ipv4Part = clean.slice(lastColon + 1);
+    const v4Num = parseIpv4ToUint32(ipv4Part);
+    if (v4Num === null) return null;
+    const hi16 = ((v4Num >>> 16) & 0xffff).toString(16);
+    const lo16 = (v4Num & 0xffff).toString(16);
+    clean = clean.slice(0, lastColon) + ":" + hi16 + ":" + lo16;
+  }
+
+  const doubleColonIdx = clean.indexOf("::");
+  if (doubleColonIdx !== -1) {
+    if (clean.indexOf("::", doubleColonIdx + 2) !== -1) {
+      return null;
+    }
+    const leftPart = clean.slice(0, doubleColonIdx);
+    const rightPart = clean.slice(doubleColonIdx + 2);
+    const leftWords = leftPart ? leftPart.split(":") : [];
+    const rightWords = rightPart ? rightPart.split(":") : [];
+    const missingCount = 8 - (leftWords.length + rightWords.length);
+    if (missingCount < 0) return null;
+    const zeros = new Array(missingCount).fill("0");
+    const allWords = [...leftWords, ...zeros, ...rightWords];
+    if (allWords.length !== 8) return null;
+    return wordsToBigInt(allWords);
+  } else {
+    const allWords = clean.split(":");
+    if (allWords.length !== 8) return null;
+    return wordsToBigInt(allWords);
+  }
+}
+
 /**
  * Checks whether an IP address is in private, loopback, link-local, or cloud metadata ranges.
+ * Implements rigorous numeric bitwise CIDR validation for both IPv4 (uint32) and IPv6 (BigInt 128-bit).
  */
 export function isPrivateIp(ip: string): boolean {
   const clean = ip.trim().toLowerCase();
   if (clean === "localhost" || clean === "0.0.0.0" || clean === "::" || clean === "::1") return true;
 
-  // IPv4 check
-  const ipv4Match = clean.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4Match) {
-    const [, a, b] = ipv4Match.map(Number);
-    if (a === 127) return true;                          // 127.0.0.0/8 (loopback)
-    if (a === 10) return true;                           // 10.0.0.0/8 (private)
-    if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12 (private)
-    if (a === 192 && b === 168) return true;              // 192.168.0.0/16 (private)
-    if (a === 169 && b === 254) return true;              // 169.254.0.0/16 (link-local / cloud metadata)
-    if (a === 0) return true;                            // 0.0.0.0/8
-    if (a >= 224) return true;                           // 224.0.0.0/4 (multicast / reserved)
-    return false;
+  // Try IPv4 first
+  const v4 = parseIpv4ToUint32(clean);
+  if (v4 !== null) {
+    return isPrivateIpv4Num(v4);
   }
 
-  // IPv6 check
-  if (clean.startsWith("::ffff:")) {
-    return isPrivateIp(clean.slice(7));
+  // Try IPv6
+  const v6 = parseIpv6ToBigInt(clean);
+  if (v6 !== null) {
+    // 1. ::/128 (unspecified)
+    if (v6 === 0n) return true;
+    // 2. ::1/128 (loopback)
+    if (v6 === 1n) return true;
+
+    // 3. IPv4-mapped: ::ffff:0:0/96 (top 96 bits are 0x0000...0000ffff)
+    if ((v6 >> 32n) === 0xffffn) {
+      const embeddedV4 = Number(v6 & 0xffffffffn);
+      return isPrivateIpv4Num(embeddedV4);
+    }
+
+    // 4. IPv4-compatible (deprecated): ::/96 (top 96 bits are 0)
+    if ((v6 >> 32n) === 0n && v6 > 1n) {
+      const embeddedV4 = Number(v6 & 0xffffffffn);
+      return isPrivateIpv4Num(embeddedV4);
+    }
+
+    // 5. NAT64: 64:ff9b::/96
+    if ((v6 >> 32n) === 0x0064ff9b0000000000000000n) {
+      const embeddedV4 = Number(v6 & 0xffffffffn);
+      return isPrivateIpv4Num(embeddedV4);
+    }
+
+    // 6. 6to4: 2002::/16 -> bits 16-47 contain IPv4
+    if ((v6 >> 112n) === 0x2002n) {
+      const embeddedV4 = Number((v6 >> 80n) & 0xffffffffn);
+      return isPrivateIpv4Num(embeddedV4);
+    }
+
+    // 7. Teredo: 2001::/32 -> bits 96-127 contain negated IPv4
+    if ((v6 >> 96n) === 0x20010000n) {
+      const embeddedV4 = Number((~v6) & 0xffffffffn);
+      return isPrivateIpv4Num(embeddedV4);
+    }
+
+    // 8. Unique Local Address (ULA): fc00::/7 (0xfc00 - 0xfdff, top 7 bits 0x7e)
+    if ((v6 >> 121n) === 0x7en) return true;
+
+    // 9. Link-local unicast: fe80::/10 (0xfe80 - 0xfebf, top 10 bits 0x3fa)
+    if ((v6 >> 118n) === 0x3fan) return true;
+
+    // 10. Multicast: ff00::/8 (0xff00 - 0xffff)
+    if ((v6 >> 120n) === 0xffn) return true;
+
+    // 11. Documentation: 2001:db8::/32
+    if ((v6 >> 96n) === 0x20010db8n) return true;
+
+    // 12. Discard-only: 100::/64
+    if ((v6 >> 64n) === 0x100000000000000n) return true;
+
+    return false;
   }
-  if (clean.startsWith("fc") || clean.startsWith("fd")) return true;  // fc00::/7 (ULA)
-  if (clean.startsWith("fe80")) return true;                           // fe80::/10 (link-local)
-  if (clean === "::1" || clean === "::") return true;
 
   return false;
 }
@@ -204,10 +351,23 @@ export interface HostIpSafetyResult {
   reason?: string;
 }
 
+// In-memory DNS safety cache with 60-second TTL to eliminate latency spikes on subresources
+interface DnsCacheEntry {
+  result: HostIpSafetyResult;
+  expiresAt: number;
+}
+const dnsSafetyCache = new Map<string, DnsCacheEntry>();
+const DNS_CACHE_TTL_MS = 60_000;
+
+export function clearDnsSafetyCache(): void {
+  dnsSafetyCache.clear();
+}
+
 /**
  * Validates that all DNS resolved IP addresses for a given hostname are public addresses.
  * Rejects hostnames resolving to private/internal IPs to prevent SSRF via DNS resolution.
  * FAILS CLOSED on DNS resolution failure or empty records.
+ * Uses an in-memory cache with 60-second TTL.
  */
 export async function validateHostIpSafetyDetails(hostname: string): Promise<HostIpSafetyResult> {
   const clean = hostname.replace(/^\[|\]$/g, "").toLowerCase();
@@ -224,31 +384,45 @@ export async function validateHostIpSafetyDetails(hostname: string): Promise<Hos
     return { safe: true, code: "SAFE" };
   }
 
+  // Check DNS safety cache
+  const cached = dnsSafetyCache.get(clean);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.result;
+  }
+
   try {
     const addresses = await dns.promises.lookup(clean, { all: true });
     if (!addresses || addresses.length === 0) {
-      return {
+      const result: HostIpSafetyResult = {
         safe: false,
         code: "DNS_EMPTY",
         reason: `DNS lookup for "${clean}" returned no address records.`,
       };
+      dnsSafetyCache.set(clean, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+      return result;
     }
     for (const addr of addresses) {
       if (isPrivateIp(addr.address)) {
-        return {
+        const result: HostIpSafetyResult = {
           safe: false,
           code: "PRIVATE_IP",
           reason: `Hostname "${clean}" resolves to private/internal IP address "${addr.address}".`,
         };
+        dnsSafetyCache.set(clean, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+        return result;
       }
     }
-    return { safe: true, code: "SAFE" };
+    const result: HostIpSafetyResult = { safe: true, code: "SAFE" };
+    dnsSafetyCache.set(clean, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+    return result;
   } catch (err) {
-    return {
+    const result: HostIpSafetyResult = {
       safe: false,
       code: "DNS_FAILURE",
       reason: `DNS resolution failed for "${clean}": ${(err as Error).message}`,
     };
+    dnsSafetyCache.set(clean, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+    return result;
   }
 }
 
@@ -270,6 +444,7 @@ export class PermissionEngine {
   /**
    * Check whether a specific tool call is permitted.
    * Prioritizes explicit tool category/capability declarations to prevent name-prefix spoofing.
+   * Enforces capability validation, custom tool default denial, and fail-closed operation checking.
    */
   check(
     toolOrName: string | { name: string; category?: string; capability?: string },
@@ -282,9 +457,67 @@ export class PermissionEngine {
     const category = toolObj?.category;
     const capability = toolObj?.capability;
 
+    // ── Capability vs Category Consistency Validation ──────────────────
+    if (category && capability) {
+      const isCoreCapability =
+        capability.startsWith("filesystem.") ||
+        capability.startsWith("terminal.") ||
+        capability.startsWith("browser.") ||
+        capability.startsWith("network.") ||
+        capability.startsWith("code.");
+
+      let valid = true;
+      if (category === "filesystem") {
+        valid = capability.startsWith("filesystem.");
+      } else if (category === "terminal") {
+        valid = capability.startsWith("terminal.") || capability === "terminal.execute";
+      } else if (category === "browser") {
+        valid = capability.startsWith("browser.") || capability === "browser.navigate" || capability === "browser.interact";
+      } else if (category === "http") {
+        valid = capability.startsWith("network.") || capability === "network.request";
+      } else if (category === "code_interpreter") {
+        valid = capability.startsWith("code.") || capability === "code.interpret";
+      } else if (category === "custom") {
+        // Custom tools cannot declare core capabilities to evade checks
+        valid = !isCoreCapability;
+      }
+
+      if (!valid) {
+        return {
+          allowed: false,
+          reason: `Security policy violation: Tool "${toolName}" declares mismatched category "${category}" and capability "${capability}".`,
+        };
+      }
+    }
+
+    // ── Custom declared application tools (DENY by default) ────────────
+    if (category === "custom" || capability === "custom" || capability?.startsWith("custom.")) {
+      if (this.policy.trusted) {
+        return { allowed: true };
+      }
+      const customPolicy = this.policy.customTools;
+      if (customPolicy?.deny?.includes(toolName)) {
+        return {
+          allowed: false,
+          reason: `Custom tool "${toolName}" is explicitly denied by permission policy.`,
+        };
+      }
+      if (customPolicy?.allow?.includes(toolName)) {
+        return { allowed: true };
+      }
+      return {
+        allowed: false,
+        reason: `Custom tool "${toolName}" is denied by default. Explicitly add it to policy.customTools.allow or enable trusted mode.`,
+      };
+    }
+
     // ── Filesystem checks ──────────────────────────────────────────────
-    if (category === "filesystem" || (!category && normalizedName.startsWith("filesystem_"))) {
-      return this.checkFilesystem(normalizedName, input);
+    if (
+      category === "filesystem" ||
+      capability?.startsWith("filesystem.") ||
+      (!category && normalizedName.startsWith("filesystem_"))
+    ) {
+      return this.checkFilesystem(normalizedName, input, capability);
     }
 
     // ── Terminal checks ────────────────────────────────────────────────
@@ -318,11 +551,6 @@ export class PermissionEngine {
           reason: "Code interpreter tools are disabled by permission policy.",
         };
       }
-      return { allowed: true };
-    }
-
-    // ── Custom declared application tools ──────────────────────────────
-    if (category === "custom") {
       return { allowed: true };
     }
 
@@ -408,7 +636,8 @@ export class PermissionEngine {
 
   private checkFilesystem(
     toolName: string,
-    input: Record<string, unknown>
+    input: Record<string, unknown>,
+    capability?: string
   ): PermissionDecision {
     const fsPolicy = this.policy.filesystem;
 
@@ -425,6 +654,7 @@ export class PermissionEngine {
     const filePath = String(input.path ?? "");
 
     const isRead =
+      capability === "filesystem.read" ||
       toolName === "filesystem_read" ||
       toolName === "filesystem_list" ||
       toolName === "filesystem_exists";
@@ -446,6 +676,7 @@ export class PermissionEngine {
     }
 
     const isWrite =
+      capability === "filesystem.write" ||
       toolName === "filesystem_write" ||
       toolName === "filesystem_delete";
 
@@ -466,7 +697,11 @@ export class PermissionEngine {
     }
 
     // For move operation: BOTH source and destination must be strictly verified!
-    if (toolName === "filesystem_move") {
+    const isMove =
+      capability === "filesystem.move" ||
+      toolName === "filesystem_move";
+
+    if (isMove) {
       const source = String(input.source ?? "");
       const destination = String(input.destination ?? "");
 
@@ -497,6 +732,14 @@ export class PermissionEngine {
           reason: `Move destination path "${destination}" is outside allowed write paths: ${fsPolicy.write.join(", ")}`,
         };
       }
+    }
+
+    // FAIL CLOSED: If the operation cannot be proven as an authorized read, write, or move, deny it!
+    if (!isRead && !isWrite && !isMove) {
+      return {
+        allowed: false,
+        reason: `Unrecognized or unauthorized filesystem operation for tool "${toolName}" (capability: "${capability || "unknown"}"). Operation denied fail-closed.`,
+      };
     }
 
     return { allowed: true };

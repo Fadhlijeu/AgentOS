@@ -4,7 +4,7 @@
 
 import { generateId } from "@agentos/core";
 import { SQLiteStore, type PersistenceStore, type MemoryRecord } from "@agentos/storage";
-import type { MemoryStore, MemoryEntry, MemoryTier } from "./index";
+import type { MemoryStore, MemoryEntry, MemoryTier, MemorySource, MemoryTrustLevel } from "./index";
 
 export class SQLiteMemoryStore implements MemoryStore {
   private store: PersistenceStore;
@@ -45,15 +45,20 @@ export class SQLiteMemoryStore implements MemoryStore {
     key: string,
     value: unknown,
     tier: MemoryTier = "working",
-    tags: string[] = []
+    tags: string[] = [],
+    metadata?: { source?: MemorySource; trustLevel?: MemoryTrustLevel }
   ): Promise<void> {
     const rawKey = this.cleanKey(key);
+    const combinedTags = [...tags];
+    if (metadata?.source) combinedTags.push(`source:${metadata.source}`);
+    if (metadata?.trustLevel) combinedTags.push(`trust:${metadata.trustLevel}`);
+
     const record: MemoryRecord = {
       id: generateId("mem"),
       tier,
       key: rawKey,
       value,
-      tags,
+      tags: combinedTags,
       timestamp: Date.now(),
     };
     this.store.saveMemory(record);
@@ -76,13 +81,19 @@ export class SQLiteMemoryStore implements MemoryStore {
 
   async getByTier(tier: MemoryTier): Promise<MemoryEntry[]> {
     const records = this.store.getMemoriesByTier(tier);
-    return records.map((r) => ({
-      key: r.key,
-      value: r.value,
-      tier: r.tier as MemoryTier,
-      timestamp: r.timestamp,
-      tags: r.tags,
-    }));
+    return records.map((r) => {
+      const sourceTag = r.tags.find((t) => t.startsWith("source:"))?.slice(7);
+      const trustTag = r.tags.find((t) => t.startsWith("trust:"))?.slice(6);
+      return {
+        key: r.key,
+        value: r.value,
+        tier: r.tier as MemoryTier,
+        timestamp: r.timestamp,
+        tags: r.tags,
+        source: sourceTag,
+        trustLevel: (trustTag as any) ?? undefined,
+      };
+    });
   }
 
   async clear(tier?: MemoryTier): Promise<void> {

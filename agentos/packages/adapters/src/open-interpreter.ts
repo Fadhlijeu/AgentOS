@@ -140,7 +140,12 @@ export class OpenInterpreterAdapter implements CodeInterpreterAdapter {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      // Handle AbortSignal
+      // Handle AbortSignal without leaking listeners
+      const onAbort = () => {
+        killed = true;
+        child.kill("SIGKILL");
+      };
+
       if (options?.signal) {
         if (options.signal.aborted) {
           child.kill("SIGKILL");
@@ -152,10 +157,7 @@ export class OpenInterpreterAdapter implements CodeInterpreterAdapter {
           });
           return;
         }
-        options.signal.addEventListener("abort", () => {
-          killed = true;
-          child.kill("SIGKILL");
-        });
+        options.signal.addEventListener("abort", onAbort, { once: true });
       }
 
       // Handle timeout
@@ -164,6 +166,13 @@ export class OpenInterpreterAdapter implements CodeInterpreterAdapter {
         child.kill("SIGKILL");
         stderr += `\n[Execution timed out after ${timeoutMs}ms]`;
       }, timeoutMs);
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (options?.signal) {
+          options.signal.removeEventListener("abort", onAbort);
+        }
+      };
 
       child.stdout.on("data", (chunk: Buffer) => {
         if (stdout.length < this.maxOutputLength) {
@@ -178,7 +187,7 @@ export class OpenInterpreterAdapter implements CodeInterpreterAdapter {
       });
 
       child.on("error", (err: Error) => {
-        clearTimeout(timer);
+        cleanup();
         resolve({
           stdout: stdout.trim(),
           stderr: `Process launch failed: ${err.message}`,
@@ -188,7 +197,7 @@ export class OpenInterpreterAdapter implements CodeInterpreterAdapter {
       });
 
       child.on("close", (code: number | null) => {
-        clearTimeout(timer);
+        cleanup();
         resolve({
           stdout: stdout.trim(),
           stderr: stderr.trim(),

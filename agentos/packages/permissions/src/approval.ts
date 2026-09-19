@@ -86,6 +86,7 @@ export class ApprovalManager {
       },
     });
 
+    let abortListener: (() => void) | undefined;
     try {
       // Race between handler, timeout, and optional abort signal
       const raceEntries: Promise<ApprovalStatus>[] = [
@@ -99,12 +100,10 @@ export class ApprovalManager {
           new Promise<ApprovalStatus>((_, reject) => {
             if (signal.aborted) {
               reject(new Error("Approval cancelled"));
-            } else {
-              signal.addEventListener("abort", () =>
-                reject(new Error("Approval cancelled")),
-                { once: true }
-              );
+              return;
             }
+            abortListener = () => reject(new Error("Approval cancelled"));
+            signal.addEventListener("abort", abortListener, { once: true });
           })
         );
       }
@@ -136,6 +135,10 @@ export class ApprovalManager {
         data: { requestId, toolName, status: "TIMEOUT" },
       });
       return false;
+    } finally {
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
     }
   }
 

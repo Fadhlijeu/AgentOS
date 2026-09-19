@@ -709,7 +709,8 @@ export class Agent {
             iterations: runContext.iteration,
             timestamp: Date.now(),
           },
-          [taskId, "outcome", finalStatus.toLowerCase()]
+          [taskId, "outcome", finalStatus.toLowerCase()],
+          { source: "task_outcome", trustLevel: "untrusted" }
         );
         this.eventBus.emit("memory.updated", {
           runId,
@@ -953,6 +954,10 @@ export class Agent {
         const check = await this.permissionEngine.checkHttpUrlAsync(url);
         return check.allowed;
       },
+      browserValidator: async (url: string) => {
+        const check = await this.permissionEngine.checkBrowserUrlAsync(url);
+        return check.allowed;
+      },
     };
 
     const toolStart = Date.now();
@@ -974,17 +979,8 @@ export class Agent {
       );
       this.tracer.recordToolResult(runId, taskId, toolCall.name, redactedResult);
 
-      this.eventBus.emit("tool.completed", {
-        runId,
-        taskId,
-        data: {
-          toolName: toolCall.name,
-          durationMs: toolDuration,
-          resultLength: result.length,
-        },
-      });
-
-      // Persist tool call record to storage with sanitized copies
+      // Persist tool call record to storage BEFORE emitting tool.completed
+      // to ensure transactional event semantics (no contradictory tool.completed -> tool.failed sequence)
       try {
         this.store.saveToolCall({
           id: generateId("call"),
@@ -1007,6 +1003,16 @@ export class Agent {
           data: { operation: "saveToolCall", error: (storeErr as Error).message },
         });
       }
+
+      this.eventBus.emit("tool.completed", {
+        runId,
+        taskId,
+        data: {
+          toolName: toolCall.name,
+          durationMs: toolDuration,
+          resultLength: result.length,
+        },
+      });
 
       return result;
     } catch (err) {

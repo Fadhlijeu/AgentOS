@@ -18,6 +18,8 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** Central network/origin validator provided by the control plane. */
   networkValidator?: (url: string) => Promise<boolean | { allowed: boolean; reason?: string }> | boolean | { allowed: boolean; reason?: string };
+  /** Central browser navigation/origin validator provided by the control plane. */
+  browserValidator?: (url: string) => Promise<boolean | { allowed: boolean; reason?: string }> | boolean | { allowed: boolean; reason?: string };
 }
 
 import { z } from "zod";

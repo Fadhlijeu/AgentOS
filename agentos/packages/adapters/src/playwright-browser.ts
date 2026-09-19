@@ -188,9 +188,20 @@ export class PlaywrightBrowserSession implements BrowserSession {
     return this.page;
   }
 
+  private stopPage(): void {
+    try {
+      this.page.evaluate(() => window.stop()).catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
+
   async navigate(url: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
-    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    if (options?.signal?.aborted) {
+      this.stopPage();
+      throw new Error("Operation cancelled by AbortSignal");
+    }
     await this.init();
 
     if (this.navigationValidator) {
@@ -204,9 +215,7 @@ export class PlaywrightBrowserSession implements BrowserSession {
       await withAbort(
         this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }),
         options?.signal,
-        () => {
-          this.page.evaluate(() => window.stop()).catch(() => {});
-        }
+        () => this.stopPage()
       );
     } catch (err) {
       const msg = (err as Error).message;
@@ -221,12 +230,19 @@ export class PlaywrightBrowserSession implements BrowserSession {
 
   async click(selector: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
-    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    if (options?.signal?.aborted) {
+      this.stopPage();
+      throw new Error("Operation cancelled by AbortSignal");
+    }
     await this.init();
 
     const locator = this.page.locator(selector).first();
     try {
-      await withAbort(locator.click({ timeout: 15000 }), options?.signal);
+      await withAbort(
+        locator.click({ timeout: 15000 }),
+        options?.signal,
+        () => this.stopPage()
+      );
     } catch (err) {
       const msg = (err as Error).message;
       if (msg.includes("blockedbyclient") || msg.includes("ERR_BLOCKED_BY_CLIENT")) {
@@ -241,17 +257,28 @@ export class PlaywrightBrowserSession implements BrowserSession {
 
   async type(selector: string, text: string, options?: { signal?: AbortSignal }): Promise<void> {
     this.assertOpen();
-    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    if (options?.signal?.aborted) {
+      this.stopPage();
+      throw new Error("Operation cancelled by AbortSignal");
+    }
     const locator = this.page.locator(selector).first();
-    await withAbort(locator.fill(text, { timeout: 15000 }), options?.signal);
+    await withAbort(
+      locator.fill(text, { timeout: 15000 }),
+      options?.signal,
+      () => this.stopPage()
+    );
   }
 
   async evaluate<T>(script: string, options?: { signal?: AbortSignal }): Promise<T> {
     this.assertOpen();
-    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    if (options?.signal?.aborted) {
+      this.stopPage();
+      throw new Error("Operation cancelled by AbortSignal");
+    }
     const result = await withAbort(
       this.page.evaluate(script),
-      options?.signal
+      options?.signal,
+      () => this.stopPage()
     );
     return result as T;
   }
@@ -378,7 +405,8 @@ export class PlaywrightBrowserSession implements BrowserSession {
         }>;
         contentSummary: string;
       }>(extractScript),
-      options?.signal
+      options?.signal,
+      () => this.stopPage()
     );
 
     return {
@@ -393,10 +421,14 @@ export class PlaywrightBrowserSession implements BrowserSession {
 
   async screenshot(options?: { signal?: AbortSignal }): Promise<Buffer> {
     this.assertOpen();
-    if (options?.signal?.aborted) throw new Error("Operation cancelled by AbortSignal");
+    if (options?.signal?.aborted) {
+      this.stopPage();
+      throw new Error("Operation cancelled by AbortSignal");
+    }
     const buffer = await withAbort(
       this.page.screenshot({ type: "png", fullPage: false }),
-      options?.signal
+      options?.signal,
+      () => this.stopPage()
     );
     return buffer;
   }

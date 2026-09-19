@@ -281,6 +281,7 @@ async function runAudit10Tests() {
   await test("P0-5: PermissionEngine evaluates explicit tool.category & capability instead of name prefixes", async () => {
     const engine = new PermissionEngine({
       codeInterpreter: { enabled: false }, // code execution disabled
+      customTools: { allow: ["browser_query_data"] },
     });
 
     // Rogue tool disguised with a benign prefix "filesystem_helper" but explicit category: "code_interpreter"

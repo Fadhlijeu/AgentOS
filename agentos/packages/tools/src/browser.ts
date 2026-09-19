@@ -209,8 +209,13 @@ export function browserTools(
       const { url } = browserOpenSchema.parse(input);
       const runId = ctx?.runId ?? "default";
 
-      // If tool context provides networkValidator and no gateway was configured, use it
-      if (ctx?.networkValidator && !activeSecurityGateway) {
+      // If tool context provides browserValidator or networkValidator and no gateway was configured, use it
+      if (ctx?.browserValidator) {
+        activeSecurityGateway = async (targetUrl: string) => {
+          const res = await ctx.browserValidator!(targetUrl);
+          return typeof res === "boolean" ? res : Boolean(res?.allowed);
+        };
+      } else if (ctx?.networkValidator && !activeSecurityGateway) {
         activeSecurityGateway = async (targetUrl: string) => {
           const res = await ctx.networkValidator!(targetUrl);
           return typeof res === "boolean" ? res : Boolean(res?.allowed);
@@ -436,13 +441,6 @@ export function browserTools(
     }
   };
 
-  // Wire per-run teardown hook on each tool in suite
-  for (const tool of suite) {
-    tool.disposeRun = async (runId: string) => {
-      await suite.closeRunSession(runId);
-    };
-  }
-
   suite.setSecurityGateway = (validator: NavigationValidator) => {
     activeSecurityGateway = validator;
     if (
@@ -453,6 +451,15 @@ export function browserTools(
       (provider as any).setNavigationValidator(validator);
     }
   };
+
+  // Wire per-run teardown hook and security gateway on each individual tool in suite
+  // so security gateways survive array composition and spread ([...browserTools()])
+  for (const tool of suite) {
+    (tool as any).setSecurityGateway = suite.setSecurityGateway;
+    tool.disposeRun = async (runId: string) => {
+      await suite.closeRunSession(runId);
+    };
+  }
 
   suite.getProvider = () => provider;
   suite.getActiveRunCount = () => sessionsByRun.size;

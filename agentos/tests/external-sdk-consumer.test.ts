@@ -67,6 +67,7 @@ async function main(): Promise<void> {
 
     // Step 4: Write consumer script that imports @agentos/sdk
     const consumerScript = `
+import assert from "node:assert";
 import { Agent, MockModelProvider } from "@agentos/sdk";
 
 async function run() {
@@ -80,7 +81,8 @@ async function run() {
     throw new Error("Agent run failed in external consumer");
   }
 
-  console.log("EXTERNAL_CONSUMER_SUCCESS: " + (result.output ?? result.finalAnswer));
+  assert(typeof result.output === "string", "result.output must be a canonical string");
+  console.log("EXTERNAL_CONSUMER_SUCCESS: " + result.output);
   await agent.dispose();
 }
 
